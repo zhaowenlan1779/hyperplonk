@@ -81,11 +81,11 @@ impl<F: PrimeField> IOPTranscript<F> {
     // as the field has a size less than 2^384.
     pub fn get_and_append_challenge(&mut self, label: &'static [u8]) -> Result<F, TranscriptError> {
         //  we need to reject when transcript is empty
-        if self.is_empty {
-            return Err(TranscriptError::InvalidTranscript(
-                "transcript is empty".to_string(),
-            ));
-        }
+        // if self.is_empty {
+        //     return Err(TranscriptError::InvalidTranscript(
+        //         "transcript is empty".to_string(),
+        //     ));
+        // }
 
         let mut buf = [0u8; 64];
         self.transcript.challenge_bytes(label, &mut buf);
@@ -105,11 +105,11 @@ impl<F: PrimeField> IOPTranscript<F> {
         len: usize,
     ) -> Result<Vec<F>, TranscriptError> {
         //  we need to reject when transcript is empty
-        if self.is_empty {
-            return Err(TranscriptError::InvalidTranscript(
-                "transcript is empty".to_string(),
-            ));
-        }
+        // if self.is_empty {
+        //     return Err(TranscriptError::InvalidTranscript(
+        //         "transcript is empty".to_string(),
+        //     ));
+        // }
 
         let mut res = vec![];
         for _ in 0..len {

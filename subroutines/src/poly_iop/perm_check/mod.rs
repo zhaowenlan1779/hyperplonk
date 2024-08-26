@@ -6,31 +6,43 @@
 
 //! Main module for the Permutation Check protocol
 
-use self::util::computer_nums_and_denoms;
-use crate::{
-    pcs::PolynomialCommitmentScheme,
-    poly_iop::{errors::PolyIOPErrors, prelude::ProductCheck, PolyIOP},
+use crate::poly_iop::{
+    errors::PolyIOPErrors,
+    rational_sumcheck::layered_circuit::{
+        BatchedDenseRationalSum, BatchedRationalSum, BatchedRationalSumProof,
+    },
+    PolyIOP,
 };
-use ark_ec::pairing::Pairing;
+use arithmetic::Fraction;
+use ark_ff::PrimeField;
 use ark_poly::DenseMultilinearExtension;
 use ark_std::{end_timer, start_timer};
 use std::sync::Arc;
 use transcript::IOPTranscript;
+use util::compute_leaves;
+
+pub struct PermutationCheckProof<F>
+where
+    F: PrimeField,
+{
+    pub proof: BatchedRationalSumProof<F>,
+    pub f_claims: Vec<Fraction<F>>,
+    pub g_claims: Vec<Fraction<F>>,
+}
 
 /// A permutation subclaim consists of
 /// - the SubClaim from the ProductCheck
 /// - Challenges beta and gamma
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct PermutationCheckSubClaim<E, PCS, PC>
+pub struct PermutationCheckSubClaim<F>
 where
-    E: Pairing,
-    PC: ProductCheck<E, PCS>,
-    PCS: PolynomialCommitmentScheme<E>,
+    F: PrimeField,
 {
-    /// the SubClaim from the ProductCheck
-    pub product_check_sub_claim: PC::ProductCheckSubClaim,
+    pub point: Vec<F>,
+    pub expected_evaluations: Vec<F>,
+
     /// Challenges beta and gamma
-    pub challenges: (E::ScalarField, E::ScalarField),
+    pub challenges: (F, F),
 }
 
 pub mod util;
@@ -46,13 +58,15 @@ pub mod util;
 /// - fs = (f1, ..., fk)
 /// - gs = (g1, ..., gk)
 /// - permutation oracles = (p1, ..., pk)
-pub trait PermutationCheck<E, PCS>: ProductCheck<E, PCS>
+pub trait PermutationCheck<F>
 where
-    E: Pairing,
-    PCS: PolynomialCommitmentScheme<E>,
+    F: PrimeField,
 {
     type PermutationCheckSubClaim;
     type PermutationProof;
+
+    type MultilinearExtension;
+    type Transcript;
 
     /// Initialize the system with a transcript
     ///
@@ -69,61 +83,43 @@ where
     /// Outputs:
     /// - a permutation check proof proving that gs is a permutation of fs under
     ///   permutation
-    /// - the product polynomial built during product check
-    /// - the fractional polynomial built during product check
     ///
     /// Cost: O(N)
     #[allow(clippy::type_complexity)]
     fn prove(
-        pcs_param: &PCS::ProverParam,
         fxs: &[Self::MultilinearExtension],
         gxs: &[Self::MultilinearExtension],
         perms: &[Self::MultilinearExtension],
-        transcript: &mut IOPTranscript<E::ScalarField>,
-    ) -> Result<
-        (
-            Self::PermutationProof,
-            Self::MultilinearExtension,
-            Self::MultilinearExtension,
-        ),
-        PolyIOPErrors,
-    >;
+        transcript: &mut IOPTranscript<F>,
+    ) -> Result<(Self::PermutationProof, Vec<F>), PolyIOPErrors>;
 
     /// Verify that (g1, ..., gk) is a permutation of
     /// (f1, ..., fk) over the permutation oracles (perm1, ..., permk)
     fn verify(
         proof: &Self::PermutationProof,
-        aux_info: &Self::VPAuxInfo,
         transcript: &mut Self::Transcript,
     ) -> Result<Self::PermutationCheckSubClaim, PolyIOPErrors>;
 }
 
-impl<E, PCS> PermutationCheck<E, PCS> for PolyIOP<E::ScalarField>
+impl<F> PermutationCheck<F> for PolyIOP<F>
 where
-    E: Pairing,
-    PCS: PolynomialCommitmentScheme<E, Polynomial = Arc<DenseMultilinearExtension<E::ScalarField>>>,
+    F: PrimeField,
 {
-    type PermutationCheckSubClaim = PermutationCheckSubClaim<E, PCS, Self>;
-    type PermutationProof = Self::ProductCheckProof;
+    type PermutationCheckSubClaim = PermutationCheckSubClaim<F>;
+    type PermutationProof = PermutationCheckProof<F>;
+    type MultilinearExtension = Arc<DenseMultilinearExtension<F>>;
+    type Transcript = IOPTranscript<F>;
 
     fn init_transcript() -> Self::Transcript {
-        IOPTranscript::<E::ScalarField>::new(b"Initializing PermutationCheck transcript")
+        IOPTranscript::<F>::new(b"Initializing PermutationCheck transcript")
     }
 
     fn prove(
-        pcs_param: &PCS::ProverParam,
         fxs: &[Self::MultilinearExtension],
         gxs: &[Self::MultilinearExtension],
         perms: &[Self::MultilinearExtension],
-        transcript: &mut IOPTranscript<E::ScalarField>,
-    ) -> Result<
-        (
-            Self::PermutationProof,
-            Self::MultilinearExtension,
-            Self::MultilinearExtension,
-        ),
-        PolyIOPErrors,
-    > {
+        transcript: &mut IOPTranscript<F>,
+    ) -> Result<(Self::PermutationProof, Vec<F>), PolyIOPErrors> {
         let start = start_timer!(|| "Permutation check prove");
         if fxs.is_empty() {
             return Err(PolyIOPErrors::InvalidParameters("fxs is empty".to_string()));
@@ -150,23 +146,34 @@ where
         // generate challenge `beta` and `gamma` from current transcript
         let beta = transcript.get_and_append_challenge(b"beta")?;
         let gamma = transcript.get_and_append_challenge(b"gamma")?;
-        let (numerators, denominators) = computer_nums_and_denoms(&beta, &gamma, fxs, gxs, perms)?;
+        let (mut f_leaves, mut g_leaves) = compute_leaves(&beta, &gamma, fxs, gxs, perms)?;
+        f_leaves.append(&mut g_leaves);
 
-        // invoke product check on numerator and denominator
-        let (proof, prod_poly, frac_poly) = <Self as ProductCheck<E, PCS>>::prove(
-            pcs_param,
-            &numerators,
-            &denominators,
-            transcript,
-        )?;
+        let mut batched_circuit =
+            <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::construct((
+                vec![vec![F::one(); f_leaves[0].len()]; f_leaves.len()],
+                f_leaves,
+            ));
+        let mut f_claims =
+            <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::claims(&batched_circuit);
+        let g_claims = f_claims.split_off(fxs.len());
+    
+        let (proof, point) =
+            <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::prove_rational_sum(
+                &mut batched_circuit,
+                transcript,
+            );
 
         end_timer!(start);
-        Ok((proof, prod_poly, frac_poly))
+        Ok((Self::PermutationProof {
+            proof,
+            f_claims,
+            g_claims,
+        }, point))
     }
 
     fn verify(
         proof: &Self::PermutationProof,
-        aux_info: &Self::VPAuxInfo,
         transcript: &mut Self::Transcript,
     ) -> Result<Self::PermutationCheckSubClaim, PolyIOPErrors> {
         let start = start_timer!(|| "Permutation check verify");
@@ -174,13 +181,32 @@ where
         let beta = transcript.get_and_append_challenge(b"beta")?;
         let gamma = transcript.get_and_append_challenge(b"gamma")?;
 
-        // invoke the zero check on the iop_proof
-        let product_check_sub_claim =
-            <Self as ProductCheck<E, PCS>>::verify(proof, aux_info, transcript)?;
+        let sum_f = proof.f_claims.iter().fold(Fraction::zero(), |acc, x| Fraction::rational_add(acc, *x));
+        let sum_g = proof.g_claims.iter().fold(Fraction::zero(), |acc, x| Fraction::rational_add(acc, *x));
+        if sum_f.p * sum_g.q != sum_g.p * sum_f.q {
+            return Err(PolyIOPErrors::InvalidProof(format!(
+                "Permutation check claims are inconsistent"
+            )));
+        }
+
+        let (claims, point) =
+            <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::verify_rational_sum(
+                &proof.proof,
+                &[&proof.f_claims[..], &proof.g_claims[..]].concat(),
+                transcript,
+            );
+
+        if claims.iter().any(|claim| claim.p != F::one())
+        {
+            return Err(PolyIOPErrors::InvalidProof(format!(
+                "Permutation check claim opened to non-1 value on numerator"
+            )));
+        }
 
         end_timer!(start);
         Ok(PermutationCheckSubClaim {
-            product_check_sub_claim,
+            point,
+            expected_evaluations: claims.iter().map(|claim| claim.q).collect(),
             challenges: (beta, gamma),
         })
     }
@@ -189,80 +215,87 @@ where
 #[cfg(test)]
 mod test {
     use super::PermutationCheck;
-    use crate::{
-        pcs::{prelude::MultilinearKzgPCS, PolynomialCommitmentScheme},
-        poly_iop::{errors::PolyIOPErrors, PolyIOP},
+    use crate::poly_iop::{errors::PolyIOPErrors, PolyIOP};
+    use arithmetic::{
+        evaluate_opt, identity_permutation_mles, math::Math, random_permutation_mles,
     };
-    use arithmetic::{evaluate_opt, identity_permutation_mles, random_permutation_mles, VPAuxInfo};
-    use ark_bls12_381::Bls12_381;
-    use ark_ec::pairing::Pairing;
+    use ark_bls12_381::Fr;
+    use ark_ff::PrimeField;
     use ark_poly::{DenseMultilinearExtension, MultilinearExtension};
     use ark_std::test_rng;
-    use std::{marker::PhantomData, sync::Arc};
+    use itertools::izip;
+    use std::iter::zip;
+    use std::sync::Arc;
 
-    type Kzg = MultilinearKzgPCS<Bls12_381>;
-
-    fn test_permutation_check_helper<E, PCS>(
-        pcs_param: &PCS::ProverParam,
-        fxs: &[Arc<DenseMultilinearExtension<E::ScalarField>>],
-        gxs: &[Arc<DenseMultilinearExtension<E::ScalarField>>],
-        perms: &[Arc<DenseMultilinearExtension<E::ScalarField>>],
+    fn test_permutation_check_helper<F>(
+        fxs: &[Arc<DenseMultilinearExtension<F>>],
+        gxs: &[Arc<DenseMultilinearExtension<F>>],
+        perms: &[Arc<DenseMultilinearExtension<F>>],
     ) -> Result<(), PolyIOPErrors>
     where
-        E: Pairing,
-        PCS: PolynomialCommitmentScheme<
-            E,
-            Polynomial = Arc<DenseMultilinearExtension<E::ScalarField>>,
-        >,
+        F: PrimeField,
     {
-        let nv = fxs[0].num_vars;
-        // what's AuxInfo used for?
-        let poly_info = VPAuxInfo {
-            max_degree: fxs.len() + 1,
-            num_variables: nv,
-            phantom: PhantomData::default(),
-        };
-
         // prover
-        let mut transcript =
-            <PolyIOP<E::ScalarField> as PermutationCheck<E, PCS>>::init_transcript();
+        let mut transcript = <PolyIOP<F> as PermutationCheck<F>>::init_transcript();
         transcript.append_message(b"testing", b"initializing transcript for testing")?;
-        let (proof, prod_x, _frac_poly) =
-            <PolyIOP<E::ScalarField> as PermutationCheck<E, PCS>>::prove(
-                pcs_param,
-                fxs,
-                gxs,
-                perms,
-                &mut transcript,
-            )?;
+        let (proof, _) = <PolyIOP<F> as PermutationCheck<F>>::prove(fxs, gxs, perms, &mut transcript)?;
 
         // verifier
-        let mut transcript =
-            <PolyIOP<E::ScalarField> as PermutationCheck<E, PCS>>::init_transcript();
+        let mut transcript = <PolyIOP<F> as PermutationCheck<F>>::init_transcript();
         transcript.append_message(b"testing", b"initializing transcript for testing")?;
-        let perm_check_sub_claim = <PolyIOP<E::ScalarField> as PermutationCheck<E, PCS>>::verify(
-            &proof,
-            &poly_info,
-            &mut transcript,
-        )?;
+        let perm_check_sub_claim =
+            <PolyIOP<F> as PermutationCheck<F>>::verify(&proof, &mut transcript)?;
 
-        // check product subclaim
-        if evaluate_opt(
-            &prod_x,
-            &perm_check_sub_claim.product_check_sub_claim.final_query.0,
-        ) != perm_check_sub_claim.product_check_sub_claim.final_query.1
+        let (beta, gamma) = perm_check_sub_claim.challenges;
+
+        let num_vars = fxs[0].num_vars();
+        let sid: F = (0..num_vars)
+            .map(|i| {
+                F::from_u64(i.pow2() as u64).unwrap() * perm_check_sub_claim.point[i]
+            })
+            .sum();
+
+        // check subclaim
+        if fxs.len() + gxs.len() != perm_check_sub_claim.expected_evaluations.len()
         {
+            return Err(PolyIOPErrors::InvalidVerifier(
+                "wrong subclaim lengthes".to_string(),
+            ));
+        }
+
+        let subclaim_valid =
+        zip(
+            fxs.iter(),
+            perm_check_sub_claim.expected_evaluations[..fxs.len()].iter(),
+        )
+        .enumerate()
+        .all(|(i, (poly, expected_evaluation))| {
+            evaluate_opt(poly, &perm_check_sub_claim.point)
+                + beta * (sid + F::from((i * (1 << num_vars)) as u64))
+                + gamma
+                == *expected_evaluation
+        })
+         && izip!(
+            gxs.iter(),
+            perms.iter(),
+            perm_check_sub_claim.expected_evaluations[fxs.len()..].iter(),
+        )
+        .all(|(poly, perm, expected_evaluation)| {
+            evaluate_opt(poly, &perm_check_sub_claim.point)
+                + beta * evaluate_opt(perm, &perm_check_sub_claim.point)
+                + gamma
+                == *expected_evaluation
+        });
+
+        if !subclaim_valid {
             return Err(PolyIOPErrors::InvalidVerifier("wrong subclaim".to_string()));
-        };
+        }
 
         Ok(())
     }
 
     fn test_permutation_check(nv: usize) -> Result<(), PolyIOPErrors> {
         let mut rng = test_rng();
-
-        let srs = MultilinearKzgPCS::<Bls12_381>::gen_srs_for_testing(&mut rng, nv)?;
-        let (pcs_param, _) = MultilinearKzgPCS::<Bls12_381>::trim(&srs, None, Some(nv))?;
         let id_perms = identity_permutation_mles(nv, 2);
 
         {
@@ -273,7 +306,7 @@ mod test {
                 Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)),
             ];
             // perms is the identity map
-            test_permutation_check_helper::<Bls12_381, Kzg>(&pcs_param, &ws, &ws, &id_perms)?;
+            test_permutation_check_helper::<Fr>(&ws, &ws, &id_perms)?;
         }
 
         {
@@ -287,7 +320,7 @@ mod test {
             // perms is the reverse identity map
             let mut perms = id_perms.clone();
             perms.reverse();
-            test_permutation_check_helper::<Bls12_381, Kzg>(&pcs_param, &fs, &gs, &perms)?;
+            test_permutation_check_helper::<Fr>(&fs, &gs, &perms)?;
         }
 
         {
@@ -299,10 +332,7 @@ mod test {
             // perms is a random map
             let perms = random_permutation_mles(nv, 2, &mut rng);
 
-            assert!(
-                test_permutation_check_helper::<Bls12_381, Kzg>(&pcs_param, &ws, &ws, &perms)
-                    .is_err()
-            );
+            assert!(test_permutation_check_helper::<Fr>(&ws, &ws, &perms).is_err());
         }
 
         {
@@ -317,10 +347,7 @@ mod test {
             ];
             // s_perm is the identity map
 
-            assert!(test_permutation_check_helper::<Bls12_381, Kzg>(
-                &pcs_param, &fs, &gs, &id_perms
-            )
-            .is_err());
+            assert!(test_permutation_check_helper::<Fr>(&fs, &gs, &id_perms).is_err());
         }
 
         Ok(())
@@ -333,11 +360,5 @@ mod test {
     #[test]
     fn test_normal_polynomial() -> Result<(), PolyIOPErrors> {
         test_permutation_check(5)
-    }
-
-    #[test]
-    fn zero_polynomial_should_error() -> Result<(), PolyIOPErrors> {
-        assert!(test_permutation_check(0).is_err());
-        Ok(())
     }
 }

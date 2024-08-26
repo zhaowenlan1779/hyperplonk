@@ -14,6 +14,15 @@ use std::sync::Arc;
 
 pub use ark_poly::DenseMultilinearExtension;
 
+pub fn bind_poly_var_bot<F: PrimeField>(poly: &mut DenseMultilinearExtension<F>, r: &F) {
+    let n = poly.evaluations.len() / 2;
+    for i in 0..n {
+        poly.evaluations[i] = poly.evaluations[2 * i] + *r * (poly.evaluations[2 * i + 1] - poly.evaluations[2 * i]);
+    }
+    poly.num_vars -= 1;
+    poly.evaluations.truncate(n);
+}
+
 /// Sample a random list of multilinear polynomials.
 /// Returns
 /// - the list of polynomials,

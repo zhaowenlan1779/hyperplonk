@@ -23,10 +23,11 @@ use subroutines::{
 ///   - the zero-check proof for checking custom gate-satisfiability
 ///   - the permutation-check proof for checking the copy constraints
 #[derive(Clone, Debug, PartialEq)]
-pub struct HyperPlonkProof<E, PC, PCS>
+pub struct HyperPlonkProof<E, PC, ZC, PCS>
 where
     E: Pairing,
-    PC: PermutationCheck<E, PCS>,
+    PC: PermutationCheck<E::ScalarField>,
+    ZC: ZeroCheck<E::ScalarField>,
     PCS: PolynomialCommitmentScheme<E>,
 {
     // PCS commit for witnesses
@@ -36,7 +37,7 @@ where
     // IOP proofs
     // =======================================================================
     // the custom gate zerocheck proof
-    pub zero_check_proof: <PC as ZeroCheck<E::ScalarField>>::ZeroCheckProof,
+    pub zero_check_proof: ZC::ZeroCheckProof,
     // the permutation check proof for copy constraints
     pub perm_check_proof: PC::PermutationProof,
 }

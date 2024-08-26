@@ -7,14 +7,15 @@
 use crate::{
     errors::HyperPlonkErrors,
     structs::{HyperPlonkIndex, HyperPlonkProof, HyperPlonkProvingKey, HyperPlonkVerifyingKey},
-    utils::{build_f, eval_f, eval_perm_gate, prover_sanity_check, PcsAccumulator},
+    utils::{build_f, eval_f, prover_sanity_check, PcsAccumulator},
     witness::WitnessColumn,
     HyperPlonkSNARK,
 };
 use arithmetic::{evaluate_opt, gen_eval_point, VPAuxInfo};
 use ark_ec::pairing::Pairing;
 use ark_poly::DenseMultilinearExtension;
-use ark_std::{end_timer, log2, start_timer, One, Zero};
+use ark_std::{end_timer, log2, start_timer, Zero};
+use itertools::izip;
 use rayon::iter::IntoParallelRefIterator;
 #[cfg(feature = "parallel")]
 use rayon::iter::ParallelIterator;
@@ -47,7 +48,7 @@ where
     type Index = HyperPlonkIndex<E::ScalarField>;
     type ProvingKey = HyperPlonkProvingKey<E, PCS>;
     type VerifyingKey = HyperPlonkVerifyingKey<E, PCS>;
-    type Proof = HyperPlonkProof<E, Self, PCS>;
+    type Proof = HyperPlonkProof<E, Self, Self, PCS>;
 
     fn preprocess(
         index: &Self::Index,
@@ -220,33 +221,21 @@ where
         // =======================================================================
         let step = start_timer!(|| "Permutation check on w_i(x)");
 
-        let (perm_check_proof, prod_x, frac_poly) = <Self as PermutationCheck<E, PCS>>::prove(
-            &pk.pcs_param,
-            &witness_polys,
-            &witness_polys,
-            &pk.permutation_oracles,
-            &mut transcript,
-        )?;
-        let perm_check_point = &perm_check_proof.zero_check_proof.point;
+        let (perm_check_proof, perm_check_point) =
+            <Self as PermutationCheck<E::ScalarField>>::prove(
+                &witness_polys,
+                &witness_polys,
+                &pk.permutation_oracles,
+                &mut transcript,
+            )?;
 
         end_timer!(step);
         // =======================================================================
         // 4. Generate evaluations and corresponding proofs
         // - permcheck
-        //  1. (deferred) batch opening prod(x) at
+        //  1. (deferred) batch opening perms(x) at
         //   - [perm_check_point]
-        //   - [perm_check_point[2..n], 0]
-        //   - [perm_check_point[2..n], 1]
-        //   - [1,...1, 0]
-        //  2. (deferred) batch opening frac(x) at
-        //   - [perm_check_point]
-        //   - [perm_check_point[2..n], 0]
-        //   - [perm_check_point[2..n], 1]
-        //  3. (deferred) batch opening s_id(x) at
-        //   - [perm_check_point]
-        //  4. (deferred) batch opening perms(x) at
-        //   - [perm_check_point]
-        //  5. (deferred) batch opening witness_i(x) at
+        //  2. (deferred) batch opening witness_i(x) at
         //   - [perm_check_point]
         //
         // - zero check evaluations and proofs
@@ -258,58 +247,19 @@ where
         // =======================================================================
         let step = start_timer!(|| "opening and evaluations");
 
-        // (perm_check_point[2..n], 0)
-        let perm_check_point_0 = [
-            &[E::ScalarField::zero()],
-            &perm_check_point[0..num_vars - 1],
-        ]
-        .concat();
-        // (perm_check_point[2..n], 1)
-        let perm_check_point_1 =
-            [&[E::ScalarField::one()], &perm_check_point[0..num_vars - 1]].concat();
-        // (1, ..., 1, 0)
-        let prod_final_query_point = [
-            vec![E::ScalarField::zero()],
-            vec![E::ScalarField::one(); num_vars - 1],
-        ]
-        .concat();
-
-        // prod(x)'s points
-        pcs_acc.insert_poly_and_points(&prod_x, &perm_check_proof.prod_x_comm, perm_check_point);
-        pcs_acc.insert_poly_and_points(&prod_x, &perm_check_proof.prod_x_comm, &perm_check_point_0);
-        pcs_acc.insert_poly_and_points(&prod_x, &perm_check_proof.prod_x_comm, &perm_check_point_1);
-        pcs_acc.insert_poly_and_points(
-            &prod_x,
-            &perm_check_proof.prod_x_comm,
-            &prod_final_query_point,
-        );
-
-        // frac(x)'s points
-        pcs_acc.insert_poly_and_points(&frac_poly, &perm_check_proof.frac_comm, perm_check_point);
-        pcs_acc.insert_poly_and_points(
-            &frac_poly,
-            &perm_check_proof.frac_comm,
-            &perm_check_point_0,
-        );
-        pcs_acc.insert_poly_and_points(
-            &frac_poly,
-            &perm_check_proof.frac_comm,
-            &perm_check_point_1,
-        );
-
         // perms(x)'s points
         for (perm, pcom) in pk
             .permutation_oracles
             .iter()
             .zip(pk.permutation_commitments.iter())
         {
-            pcs_acc.insert_poly_and_points(perm, pcom, perm_check_point);
+            pcs_acc.insert_poly_and_points(perm, pcom, &perm_check_point);
         }
 
         // witnesses' points
         // TODO: refactor so it remains correct even if the order changed
         for (wpoly, wcom) in witness_polys.iter().zip(witness_commits.iter()) {
-            pcs_acc.insert_poly_and_points(wpoly, wcom, perm_check_point);
+            pcs_acc.insert_poly_and_points(wpoly, wcom, &perm_check_point);
         }
         for (wpoly, wcom) in witness_polys.iter().zip(witness_commits.iter()) {
             pcs_acc.insert_poly_and_points(wpoly, wcom, &zero_check_proof.point);
@@ -414,15 +364,13 @@ where
         }
 
         // Extract evaluations from openings
-        let prod_evals = &proof.batch_openings.f_i_eval_at_point_i[0..4];
-        let frac_evals = &proof.batch_openings.f_i_eval_at_point_i[4..7];
-        let perm_evals = &proof.batch_openings.f_i_eval_at_point_i[7..7 + num_witnesses];
+        let perm_evals = &proof.batch_openings.f_i_eval_at_point_i[..num_witnesses];
         let witness_perm_evals =
-            &proof.batch_openings.f_i_eval_at_point_i[7 + num_witnesses..7 + 2 * num_witnesses];
+            &proof.batch_openings.f_i_eval_at_point_i[num_witnesses..2 * num_witnesses];
         let witness_gate_evals =
-            &proof.batch_openings.f_i_eval_at_point_i[7 + 2 * num_witnesses..7 + 3 * num_witnesses];
+            &proof.batch_openings.f_i_eval_at_point_i[2 * num_witnesses..3 * num_witnesses];
         let selector_evals = &proof.batch_openings.f_i_eval_at_point_i
-            [7 + 3 * num_witnesses..7 + 3 * num_witnesses + num_selectors];
+            [3 * num_witnesses..3 * num_witnesses + num_selectors];
         let pi_eval = proof.batch_openings.f_i_eval_at_point_i.last().unwrap();
 
         // =======================================================================
@@ -469,25 +417,12 @@ where
         // =======================================================================
         let step = start_timer!(|| "verify permutation check");
 
-        // Zero check and perm check have different AuxInfo
-        let perm_check_aux_info = VPAuxInfo::<E::ScalarField> {
-            // Prod(x) has a max degree of witnesses.len() + 1
-            max_degree: proof.witness_commits.len() + 1,
-            num_variables: num_vars,
-            phantom: PhantomData::default(),
-        };
-        let perm_check_sub_claim = <Self as PermutationCheck<E, PCS>>::verify(
+        let perm_check_sub_claim = <Self as PermutationCheck<E::ScalarField>>::verify(
             &proof.perm_check_proof,
-            &perm_check_aux_info,
             &mut transcript,
         )?;
 
-        let perm_check_point = perm_check_sub_claim
-            .product_check_sub_claim
-            .zero_check_sub_claim
-            .point;
-
-        let alpha = perm_check_sub_claim.product_check_sub_claim.alpha;
+        let perm_check_point = perm_check_sub_claim.point;
         let (beta, gamma) = perm_check_sub_claim.challenges;
 
         let mut id_evals = vec![];
@@ -496,24 +431,24 @@ where
             id_evals.push(vk.params.eval_id_oracle(&ith_point[..])?);
         }
 
-        // check evaluation subclaim
-        let perm_gate_eval = eval_perm_gate(
-            prod_evals,
-            frac_evals,
-            witness_perm_evals,
-            &id_evals[..],
-            perm_evals,
-            alpha,
-            beta,
-            gamma,
-            *perm_check_point.last().unwrap(),
-        )?;
-        if perm_gate_eval
-            != perm_check_sub_claim
-                .product_check_sub_claim
-                .zero_check_sub_claim
-                .expected_evaluation
-        {
+        // check evaluation subclaim:
+        let subclaim_consistent = izip!(
+            witness_perm_evals.iter(),
+            id_evals.iter(),
+            perm_check_sub_claim.expected_evaluations[..num_witnesses].iter(),
+        )
+        .all(|(witness_eval, id_eval, expected_evaluation)| {
+            *witness_eval + beta * id_eval + gamma == *expected_evaluation
+        }) && izip!(
+            witness_perm_evals.iter(),
+            perm_evals.iter(),
+            perm_check_sub_claim.expected_evaluations[num_witnesses..].iter(),
+        )
+        .all(|(witness_eval, perm_eval, expected_evaluation)| {
+            *witness_eval + beta * perm_eval + gamma == *expected_evaluation
+        });
+
+        if !subclaim_consistent {
             return Err(HyperPlonkErrors::InvalidVerifier(
                 "evaluation failed".to_string(),
             ));
@@ -528,36 +463,6 @@ where
         // generate evaluation points and commitments
         let mut comms = vec![];
         let mut points = vec![];
-
-        let perm_check_point_0 = [
-            &[E::ScalarField::zero()],
-            &perm_check_point[0..num_vars - 1],
-        ]
-        .concat();
-        let perm_check_point_1 =
-            [&[E::ScalarField::one()], &perm_check_point[0..num_vars - 1]].concat();
-        let prod_final_query_point = [
-            vec![E::ScalarField::zero()],
-            vec![E::ScalarField::one(); num_vars - 1],
-        ]
-        .concat();
-
-        // prod(x)'s points
-        comms.push(proof.perm_check_proof.prod_x_comm);
-        comms.push(proof.perm_check_proof.prod_x_comm);
-        comms.push(proof.perm_check_proof.prod_x_comm);
-        comms.push(proof.perm_check_proof.prod_x_comm);
-        points.push(perm_check_point.clone());
-        points.push(perm_check_point_0.clone());
-        points.push(perm_check_point_1.clone());
-        points.push(prod_final_query_point);
-        // frac(x)'s points
-        comms.push(proof.perm_check_proof.frac_comm);
-        comms.push(proof.perm_check_proof.frac_comm);
-        comms.push(proof.perm_check_proof.frac_comm);
-        points.push(perm_check_point.clone());
-        points.push(perm_check_point_0);
-        points.push(perm_check_point_1);
 
         // perms' points
         for &pcom in vk.perm_commitments.iter() {
@@ -629,7 +534,7 @@ mod tests {
     };
     use arithmetic::{identity_permutation, random_permutation};
     use ark_bls12_381::Bls12_381;
-    use ark_std::test_rng;
+    use ark_std::{test_rng, One};
     use subroutines::pcs::prelude::MultilinearKzgPCS;
 
     #[test]

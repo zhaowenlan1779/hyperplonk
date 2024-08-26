@@ -5,13 +5,23 @@
 // along with the HyperPlonk library. If not, see <https://mit-license.org/>.
 
 mod errors;
+mod fraction;
+mod gaussian_elimination;
 mod multilinear_polynomial;
+mod optimized_mul;
 mod univariate_polynomial;
 mod util;
 mod virtual_polynomial;
 
+pub mod eq_poly;
+pub mod math;
+pub mod unipoly;
+
+pub use fraction::Fraction;
+pub use optimized_mul::OptimizedMul;
 pub use errors::ArithErrors;
 pub use multilinear_polynomial::{
+    bind_poly_var_bot,
     evaluate_no_par, evaluate_opt, fix_last_variables, fix_last_variables_no_par, fix_variables,
     identity_permutation, identity_permutation_mles, merge_polynomials, random_mle_list,
     random_permutation, random_permutation_mles, random_zero_mle_list, DenseMultilinearExtension,

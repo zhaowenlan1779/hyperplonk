@@ -27,19 +27,13 @@ use std::sync::Arc;
 ///
 /// The caller is responsible for sanity-check
 #[allow(clippy::type_complexity)]
-pub(super) fn computer_nums_and_denoms<F: PrimeField>(
+pub(super) fn compute_leaves<F: PrimeField>(
     beta: &F,
     gamma: &F,
     fxs: &[Arc<DenseMultilinearExtension<F>>],
     gxs: &[Arc<DenseMultilinearExtension<F>>],
     perms: &[Arc<DenseMultilinearExtension<F>>],
-) -> Result<
-    (
-        Vec<Arc<DenseMultilinearExtension<F>>>,
-        Vec<Arc<DenseMultilinearExtension<F>>>,
-    ),
-    PolyIOPErrors,
-> {
+) -> Result<(Vec<Vec<F>>, Vec<Vec<F>>), PolyIOPErrors> {
     let start = start_timer!(|| "compute numerators and denominators");
 
     let num_vars = fxs[0].num_vars;
@@ -60,14 +54,8 @@ pub(super) fn computer_nums_and_denoms<F: PrimeField>(
             numerator_evals.push(numerator);
             denominator_evals.push(denominator);
         }
-        numerators.push(Arc::new(DenseMultilinearExtension::from_evaluations_vec(
-            num_vars,
-            numerator_evals,
-        )));
-        denominators.push(Arc::new(DenseMultilinearExtension::from_evaluations_vec(
-            num_vars,
-            denominator_evals,
-        )));
+        numerators.push(numerator_evals);
+        denominators.push(denominator_evals);
     }
 
     end_timer!(start);

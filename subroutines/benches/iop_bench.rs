@@ -139,9 +139,6 @@ fn bench_permutation_check() -> Result<(), PolyIOPErrors> {
     let mut rng = test_rng();
 
     for nv in 4..20 {
-        let srs = Kzg::gen_srs_for_testing(&mut rng, nv + 1)?;
-        let (pcs_param, _) = Kzg::trim(&srs, None, Some(nv + 1))?;
-
         let repetition = if nv < 10 {
             100
         } else if nv < 20 {
@@ -155,44 +152,28 @@ fn bench_permutation_check() -> Result<(), PolyIOPErrors> {
         // identity map
         let perms = identity_permutation_mles(nv, 1);
 
-        let proof =
-            {
-                let start = Instant::now();
-                let mut transcript =
-                    <PolyIOP<Fr> as PermutationCheck<Bls12_381, Kzg>>::init_transcript();
-                transcript.append_message(b"testing", b"initializing transcript for testing")?;
+        let proof = {
+            let start = Instant::now();
+            let mut transcript = <PolyIOP<Fr> as PermutationCheck<Fr>>::init_transcript();
+            transcript.append_message(b"testing", b"initializing transcript for testing")?;
 
-                let (proof, _q_x, _frac_poly) = <PolyIOP<Fr> as PermutationCheck<
-                    Bls12_381,
-                    Kzg,
-                >>::prove(
-                    &pcs_param, &ws, &ws, &perms, &mut transcript
-                )?;
+            let proof =
+                <PolyIOP<Fr> as PermutationCheck<Fr>>::prove(&ws, &ws, &perms, &mut transcript)?;
 
-                println!(
-                    "permutation check proving time for {} variables: {} ns",
-                    nv,
-                    start.elapsed().as_nanos() / repetition as u128
-                );
-                proof
-            };
+            println!(
+                "permutation check proving time for {} variables: {} ns",
+                nv,
+                start.elapsed().as_nanos() / repetition as u128
+            );
+            proof.0
+        };
 
         {
-            let poly_info = VPAuxInfo {
-                max_degree: 2,
-                num_variables: nv,
-                phantom: PhantomData::default(),
-            };
-
             let start = Instant::now();
-            let mut transcript =
-                <PolyIOP<Fr> as PermutationCheck<Bls12_381, Kzg>>::init_transcript();
+            let mut transcript = <PolyIOP<Fr> as PermutationCheck<Fr>>::init_transcript();
             transcript.append_message(b"testing", b"initializing transcript for testing")?;
-            let _perm_check_sum_claim = <PolyIOP<Fr> as PermutationCheck<Bls12_381, Kzg>>::verify(
-                &proof,
-                &poly_info,
-                &mut transcript,
-            )?;
+            let _perm_check_sum_claim =
+                <PolyIOP<Fr> as PermutationCheck<Fr>>::verify(&proof, &mut transcript)?;
             println!(
                 "permutation check verification time for {} variables: {} ns",
                 nv,

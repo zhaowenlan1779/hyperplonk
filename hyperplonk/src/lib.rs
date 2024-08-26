@@ -23,7 +23,7 @@ mod witness;
 
 /// A trait for HyperPlonk SNARKs.
 /// A HyperPlonk is derived from ZeroChecks and PermutationChecks.
-pub trait HyperPlonkSNARK<E, PCS>: PermutationCheck<E, PCS>
+pub trait HyperPlonkSNARK<E, PCS>: PermutationCheck<E::ScalarField>
 where
     E: Pairing,
     PCS: PolynomialCommitmentScheme<E>,

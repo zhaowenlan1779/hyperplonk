@@ -17,6 +17,14 @@ macro_rules! to_bytes {
     }};
 }
 
+pub fn drop_in_background_thread<T>(data: T)
+where
+    T: Send + 'static,
+{
+    // h/t https://abrams.cc/rust-dropping-things-in-another-thread
+    rayon::spawn(move || drop(data));
+}
+
 #[cfg(test)]
 mod test {
     use ark_bls12_381::Fr;
