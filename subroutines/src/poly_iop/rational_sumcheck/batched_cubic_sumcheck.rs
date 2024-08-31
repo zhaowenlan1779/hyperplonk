@@ -5,83 +5,13 @@
 // You should have received a copy of the MIT License
 // along with the HyperPlonk library. If not, see <https://mit-license.org/>.
 
-//! This module implements the sum check protocol.
+//! This module implements batched cubic sumchecks
 
-use crate::poly_iop::errors::PolyIOPErrors;
+use crate::poly_iop::sum_check::generic_sumcheck::SumcheckInstanceProof;
 use ark_ff::PrimeField;
 use ark_poly::DenseMultilinearExtension;
-use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use std::fmt::Debug;
 use transcript::IOPTranscript;
 use arithmetic::unipoly::{CompressedUniPoly, UniPoly};
-
-#[derive(CanonicalSerialize, CanonicalDeserialize, Debug)]
-pub struct SumcheckInstanceProof<F: PrimeField> {
-    compressed_polys: Vec<CompressedUniPoly<F>>,
-}
-
-impl<F: PrimeField> SumcheckInstanceProof<F> {
-    pub fn new(compressed_polys: Vec<CompressedUniPoly<F>>) -> SumcheckInstanceProof<F> {
-        SumcheckInstanceProof { compressed_polys }
-    }
-
-    /// Verify this sumcheck proof.
-    /// Note: Verification does not execute the final check of sumcheck protocol: g_v(r_v) = oracle_g(r),
-    /// as the oracle is not passed in. Expected that the caller will implement.
-    ///
-    /// Params
-    /// - `claim`: Claimed evaluation
-    /// - `num_rounds`: Number of rounds of sumcheck, or number of variables to bind
-    /// - `degree_bound`: Maximum allowed degree of the combined univariate polynomial
-    /// - `transcript`: Fiat-shamir transcript
-    ///
-    /// Returns (e, r)
-    /// - `e`: Claimed evaluation at random point
-    /// - `r`: Evaluation point
-    /// #[tracing::instrument(skip_all, name = "Sumcheck::verify")]
-    pub fn verify(
-        &self,
-        claim: F,
-        num_rounds: usize,
-        degree_bound: usize,
-        transcript: &mut IOPTranscript<F>,
-    ) -> Result<(F, Vec<F>), PolyIOPErrors> {
-        let mut e = claim;
-        let mut r: Vec<F> = Vec::new();
-
-        // verify that there is a univariate polynomial for each round
-        assert_eq!(self.compressed_polys.len(), num_rounds);
-        for i in 0..self.compressed_polys.len() {
-            let poly = self.compressed_polys[i].decompress(&e);
-
-            // verify degree bound
-            if poly.degree() != degree_bound {
-                return Err(PolyIOPErrors::InvalidProof(
-                    format!("degree_bound = {}, poly.degree() = {}",
-                    degree_bound,
-                    poly.degree(),
-                )
-                ));
-            }
-
-            // check if G_k(0) + G_k(1) = e
-            assert_eq!(poly.eval_at_zero() + poly.eval_at_one(), e);
-
-            // append the prover's message to the transcript
-            transcript.append_serializable_element(b"poly", &poly)?;
-
-            //derive the verifier's challenge for the next round
-            let r_i = transcript.get_and_append_challenge(b"challenge_nextround")?;
-
-            r.push(r_i);
-
-            // evaluate the claimed degree-ell polynomial at r_i
-            e = poly.evaluate(&r_i);
-        }
-
-        Ok((e, r))
-    }
-}
 
 // A cubic sumcheck instance that is not represented as virtual polynomials.
 // Instead the struct itself can hold arbitrary state as long as it can bind varaibles

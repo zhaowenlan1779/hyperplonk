@@ -8,11 +8,14 @@
 
 use ark_ec::pairing::Pairing;
 use errors::HyperPlonkErrors;
+use lookup::{HyperPlonkLookupPlugin, HyperPlonkLookupPluginNull};
 use subroutines::{pcs::prelude::PolynomialCommitmentScheme, poly_iop::prelude::PermutationCheck};
+use transcript::IOPTranscript;
 use witness::WitnessColumn;
 
 mod custom_gate;
 mod errors;
+mod lookup;
 mod mock;
 pub mod prelude;
 mod selectors;
@@ -23,10 +26,12 @@ mod witness;
 
 /// A trait for HyperPlonk SNARKs.
 /// A HyperPlonk is derived from ZeroChecks and PermutationChecks.
-pub trait HyperPlonkSNARK<E, PCS>: PermutationCheck<E::ScalarField>
+pub trait HyperPlonkSNARK<E, PCS, Lookup = HyperPlonkLookupPluginNull>: PermutationCheck<E::ScalarField>
 where
     E: Pairing,
     PCS: PolynomialCommitmentScheme<E>,
+    Lookup: HyperPlonkLookupPlugin<E, PCS,
+    Transcript = IOPTranscript<E::ScalarField>>,
 {
     type Index;
     type ProvingKey;
@@ -60,6 +65,7 @@ where
         pk: &Self::ProvingKey,
         pub_input: &[E::ScalarField],
         witnesses: &[WitnessColumn<E::ScalarField>],
+        ops: &Lookup::Ops,
     ) -> Result<Self::Proof, HyperPlonkErrors>;
 
     /// Verify the HyperPlonk proof.

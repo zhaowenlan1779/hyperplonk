@@ -14,6 +14,18 @@ use std::sync::Arc;
 
 pub use ark_poly::DenseMultilinearExtension;
 
+pub fn bind_poly_var_top<F : PrimeField>(poly: &mut DenseMultilinearExtension<F>, r: &F) {
+    let n = poly.evaluations.len() / 2;
+    let (left, right) = poly.evaluations.split_at_mut(n);
+
+    left.iter_mut().zip(right.iter()).for_each(|(a, b)| {
+        *a += *r * (*b - *a);
+    });
+
+    poly.num_vars -= 1;
+    poly.evaluations.truncate(n);
+}
+
 pub fn bind_poly_var_bot<F: PrimeField>(poly: &mut DenseMultilinearExtension<F>, r: &F) {
     let n = poly.evaluations.len() / 2;
     for i in 0..n {
@@ -92,6 +104,16 @@ pub fn identity_permutation<F: PrimeField>(num_vars: usize, num_chunks: usize) -
     (0..len).map(F::from).collect()
 }
 
+pub fn identity_permutation_mle<F: PrimeField>(
+    shift: u64,
+    num_vars: usize
+) -> Arc<DenseMultilinearExtension<F>> {
+    let s_id_vec = (shift..shift + (1u64 << num_vars)).map(F::from).collect();
+    Arc::new(DenseMultilinearExtension::from_evaluations_vec(
+        num_vars, s_id_vec,
+    ))
+}
+
 /// A list of MLEs that represents an identity permutation
 pub fn identity_permutation_mles<F: PrimeField>(
     num_vars: usize,
@@ -100,12 +122,36 @@ pub fn identity_permutation_mles<F: PrimeField>(
     let mut res = vec![];
     for i in 0..num_chunks {
         let shift = (i * (1 << num_vars)) as u64;
-        let s_id_vec = (shift..shift + (1u64 << num_vars)).map(F::from).collect();
-        res.push(Arc::new(DenseMultilinearExtension::from_evaluations_vec(
-            num_vars, s_id_vec,
-        )));
+        res.push(identity_permutation_mle(shift, num_vars));
     }
     res
+}
+
+pub fn random_permutation_u64<R: RngCore>(
+    len: usize,
+    rng: &mut R,
+) -> Vec<u64> {
+    let mut s_id_vec: Vec<u64> = (0..len as u64).into_iter().collect();
+    let mut s_perm_vec = vec![];
+    for _ in 0..len {
+        let index = rng.next_u64() as usize % s_id_vec.len();
+        s_perm_vec.push(s_id_vec.remove(index));
+    }
+    s_perm_vec
+}
+
+
+pub fn random_permutation_raw<F: PrimeField, R: RngCore>(
+    len: u64,
+    rng: &mut R,
+) -> Vec<F> {
+    let mut s_id_vec: Vec<F> = (0..len).map(F::from).collect();
+    let mut s_perm_vec = vec![];
+    for _ in 0..len {
+        let index = rng.next_u64() as usize % s_id_vec.len();
+        s_perm_vec.push(s_id_vec.remove(index));
+    }
+    s_perm_vec
 }
 
 pub fn random_permutation<F: PrimeField, R: RngCore>(

@@ -1,5 +1,6 @@
 use crate::poly_iop::utils::drop_in_background_thread;
-use super::batched_cubic_sumcheck::{BatchedCubicSumcheckInstance, SumcheckInstanceProof};
+use crate::poly_iop::sum_check::generic_sumcheck::SumcheckInstanceProof;
+use super::batched_cubic_sumcheck::BatchedCubicSumcheckInstance;
 use arithmetic::{bind_poly_var_bot, eq_poly::EqPolynomial, math::Math, unipoly::UniPoly, Fraction, OptimizedMul};
 use ark_ff::{PrimeField, Zero};
 use ark_poly::DenseMultilinearExtension;

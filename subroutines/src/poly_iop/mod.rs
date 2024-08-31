@@ -8,6 +8,7 @@ use ark_ff::PrimeField;
 use std::marker::PhantomData;
 
 mod errors;
+mod lookup;
 mod perm_check;
 pub mod prelude;
 mod prod_check;

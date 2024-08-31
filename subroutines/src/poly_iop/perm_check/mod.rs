@@ -13,21 +13,42 @@ use crate::poly_iop::{
     },
     PolyIOP,
 };
-use arithmetic::Fraction;
+use arithmetic::{math::Math, Fraction};
 use ark_ff::PrimeField;
 use ark_poly::DenseMultilinearExtension;
 use ark_std::{end_timer, start_timer};
+use itertools::izip;
+use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
+use std::iter::zip;
+use std::mem::take;
 use std::sync::Arc;
 use transcript::IOPTranscript;
 use util::compute_leaves;
 
-pub struct PermutationCheckProof<F>
+pub struct PermutationCheckProofSingle<F>
 where
     F: PrimeField,
 {
     pub proof: BatchedRationalSumProof<F>,
     pub f_claims: Vec<Fraction<F>>,
     pub g_claims: Vec<Fraction<F>>,
+}
+
+pub struct PermutationCheckProof<F>
+where
+    F: PrimeField,
+{
+    pub proofs: Vec<PermutationCheckProofSingle<F>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PermutationCheckSubClaimSingle<F>
+where
+    F: PrimeField,
+{
+    pub point: Vec<F>,
+    pub expected_evaluations: Vec<F>,
+    pub len: usize,
 }
 
 /// A permutation subclaim consists of
@@ -38,8 +59,7 @@ pub struct PermutationCheckSubClaim<F>
 where
     F: PrimeField,
 {
-    pub point: Vec<F>,
-    pub expected_evaluations: Vec<F>,
+    pub subclaims: Vec<PermutationCheckSubClaimSingle<F>>,
 
     /// Challenges beta and gamma
     pub challenges: (F, F),
@@ -91,7 +111,7 @@ where
         gxs: &[Self::MultilinearExtension],
         perms: &[Self::MultilinearExtension],
         transcript: &mut IOPTranscript<F>,
-    ) -> Result<(Self::PermutationProof, Vec<F>), PolyIOPErrors>;
+    ) -> Result<(Self::PermutationProof, Vec<Vec<F>>), PolyIOPErrors>;
 
     /// Verify that (g1, ..., gk) is a permutation of
     /// (f1, ..., fk) over the permutation oracles (perm1, ..., permk)
@@ -99,6 +119,13 @@ where
         proof: &Self::PermutationProof,
         transcript: &mut Self::Transcript,
     ) -> Result<Self::PermutationCheckSubClaim, PolyIOPErrors>;
+
+    fn check_openings(
+        subclaim: &Self::PermutationCheckSubClaim,
+        f_openings: &[F],
+        g_openings: &[F],
+        perm_openings: &[F],
+    ) -> Result<(), PolyIOPErrors>;
 }
 
 impl<F> PermutationCheck<F> for PolyIOP<F>
@@ -119,7 +146,7 @@ where
         gxs: &[Self::MultilinearExtension],
         perms: &[Self::MultilinearExtension],
         transcript: &mut IOPTranscript<F>,
-    ) -> Result<(Self::PermutationProof, Vec<F>), PolyIOPErrors> {
+    ) -> Result<(Self::PermutationProof, Vec<Vec<F>>), PolyIOPErrors> {
         let start = start_timer!(|| "Permutation check prove");
         if fxs.is_empty() {
             return Err(PolyIOPErrors::InvalidParameters("fxs is empty".to_string()));
@@ -133,43 +160,46 @@ where
             )));
         }
 
-        let num_vars = fxs[0].num_vars;
-        for ((fx, gx), perm) in fxs.iter().zip(gxs.iter()).zip(perms.iter()) {
-            if (fx.num_vars != num_vars) || (gx.num_vars != num_vars) || (perm.num_vars != num_vars)
-            {
-                return Err(PolyIOPErrors::InvalidParameters(
-                    "number of variables unmatched".to_string(),
-                ));
-            }
-        }
-
         // generate challenge `beta` and `gamma` from current transcript
         let beta = transcript.get_and_append_challenge(b"beta")?;
         let gamma = transcript.get_and_append_challenge(b"gamma")?;
-        let (mut f_leaves, mut g_leaves) = compute_leaves(&beta, &gamma, fxs, gxs, perms)?;
-        f_leaves.append(&mut g_leaves);
+        let mut leaves = compute_leaves(&beta, &gamma, fxs, gxs, perms)?;
 
-        let mut batched_circuit =
-            <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::construct((
-                vec![vec![F::one(); f_leaves[0].len()]; f_leaves.len()],
-                f_leaves,
-            ));
-        let mut f_claims =
-            <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::claims(&batched_circuit);
-        let g_claims = f_claims.split_off(fxs.len());
-    
-        let (proof, point) =
-            <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::prove_rational_sum(
-                &mut batched_circuit,
-                transcript,
-            );
+        let mut to_prove = leaves
+            .par_iter_mut()
+            .map(|mut leave| {
+                let leave_len = leave.len();
+                let batched_circuit =
+                    <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::construct((
+                        vec![vec![F::one(); leave[0].len()]; leave.len()],
+                        take(&mut leave),
+                    ));
+                let mut f_claims = <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::claims(
+                    &batched_circuit,
+                );
+                let g_claims = f_claims.split_off(leave_len / 2);
+                (batched_circuit, f_claims, g_claims)
+            })
+            .collect::<Vec<_>>();
+
+        let mut proofs = Vec::with_capacity(to_prove.len());
+        let mut points = Vec::with_capacity(to_prove.len());
+        for (batched_circuit, f_claims, g_claims) in to_prove.iter_mut() {
+            let (proof, point) =
+                <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::prove_rational_sum(
+                    batched_circuit,
+                    transcript,
+                );
+            proofs.push(PermutationCheckProofSingle {
+                proof,
+                f_claims: take(f_claims),
+                g_claims: take(g_claims),
+            });
+            points.push(point);
+        }
 
         end_timer!(start);
-        Ok((Self::PermutationProof {
-            proof,
-            f_claims,
-            g_claims,
-        }, point))
+        Ok((Self::PermutationProof { proofs }, points))
     }
 
     fn verify(
@@ -181,34 +211,114 @@ where
         let beta = transcript.get_and_append_challenge(b"beta")?;
         let gamma = transcript.get_and_append_challenge(b"gamma")?;
 
-        let sum_f = proof.f_claims.iter().fold(Fraction::zero(), |acc, x| Fraction::rational_add(acc, *x));
-        let sum_g = proof.g_claims.iter().fold(Fraction::zero(), |acc, x| Fraction::rational_add(acc, *x));
+        let (sum_f, sum_g) = proof
+            .proofs
+            .par_iter()
+            .map(|proof| {
+                let sum_f = proof
+                    .f_claims
+                    .iter()
+                    .fold(Fraction::zero(), |acc, x| Fraction::rational_add(acc, *x));
+                let sum_g = proof
+                    .g_claims
+                    .iter()
+                    .fold(Fraction::zero(), |acc, x| Fraction::rational_add(acc, *x));
+                (sum_f, sum_g)
+            })
+            .reduce(
+                || (Fraction::zero(), Fraction::zero()),
+                |(acc_f, acc_g), (f, g)| {
+                    (
+                        Fraction::rational_add(acc_f, f),
+                        Fraction::rational_add(acc_g, g),
+                    )
+                },
+            );
+
         if sum_f.p * sum_g.q != sum_g.p * sum_f.q {
             return Err(PolyIOPErrors::InvalidProof(format!(
                 "Permutation check claims are inconsistent"
             )));
         }
 
-        let (claims, point) =
-            <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::verify_rational_sum(
-                &proof.proof,
-                &[&proof.f_claims[..], &proof.g_claims[..]].concat(),
-                transcript,
-            );
+        let mut subclaims = Vec::with_capacity(proof.proofs.len());
+        for proof in proof.proofs.iter() {
+            let (claims, point) =
+                <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::verify_rational_sum(
+                    &proof.proof,
+                    &[&proof.f_claims[..], &proof.g_claims[..]].concat(),
+                    transcript,
+                );
 
-        if claims.iter().any(|claim| claim.p != F::one())
-        {
-            return Err(PolyIOPErrors::InvalidProof(format!(
-                "Permutation check claim opened to non-1 value on numerator"
-            )));
+            if claims.iter().any(|claim| claim.p != F::one()) {
+                return Err(PolyIOPErrors::InvalidProof(format!(
+                    "Permutation check claim opened to non-1 value on numerator"
+                )));
+            }
+            subclaims.push(PermutationCheckSubClaimSingle {
+                point,
+                expected_evaluations: claims.iter().map(|claim| claim.q).collect(),
+                len: proof.f_claims.len(),
+            });
         }
 
         end_timer!(start);
         Ok(PermutationCheckSubClaim {
-            point,
-            expected_evaluations: claims.iter().map(|claim| claim.q).collect(),
+            subclaims,
             challenges: (beta, gamma),
         })
+    }
+
+    fn check_openings(
+        subclaim: &Self::PermutationCheckSubClaim,
+        f_openings: &[F],
+        g_openings: &[F],
+        perm_openings: &[F],
+    ) -> Result<(), PolyIOPErrors> {
+        let (beta, gamma) = subclaim.challenges;
+
+        let mut shift = 0;
+        let mut offset = 0;
+        for subclaim in subclaim.subclaims.iter() {
+            let num_vars = subclaim.point.len();
+            let sid: F = (0..num_vars)
+                .map(|i| F::from_u64(i.pow2() as u64).unwrap() * subclaim.point[i])
+                .sum::<F>()
+                + F::from_u64(shift as u64).unwrap();
+
+            // check subclaim
+            if subclaim.len * 2 != subclaim.expected_evaluations.len() {
+                return Err(PolyIOPErrors::InvalidVerifier(
+                    "wrong subclaim lengthes".to_string(),
+                ));
+            }
+
+            let subclaim_valid = zip(
+                f_openings[offset..offset + subclaim.len].iter(),
+                subclaim.expected_evaluations[..subclaim.len].iter(),
+            )
+            .enumerate()
+            .all(|(i, (f_eval, expected_evaluation))| {
+                *f_eval + beta * (sid + F::from((i * (1 << num_vars)) as u64)) + gamma
+                    == *expected_evaluation
+            }) && izip!(
+                g_openings[offset..offset + subclaim.len].iter(),
+                perm_openings[offset..offset + subclaim.len].iter(),
+                subclaim.expected_evaluations[subclaim.len..].iter(),
+            )
+            .all(|(g_eval, perm_eval, expected_evaluation)| {
+                *g_eval + beta * perm_eval + gamma == *expected_evaluation
+            });
+
+            if !subclaim_valid {
+                return Err(PolyIOPErrors::InvalidVerifier("wrong subclaim".to_string()));
+            }
+
+            shift += subclaim.len * num_vars.pow2();
+            offset += subclaim.len;
+        }
+
+        Ok(())
     }
 }
 
@@ -217,14 +327,14 @@ mod test {
     use super::PermutationCheck;
     use crate::poly_iop::{errors::PolyIOPErrors, PolyIOP};
     use arithmetic::{
-        evaluate_opt, identity_permutation_mles, math::Math, random_permutation_mles,
+        evaluate_opt, identity_permutation_mle, identity_permutation_mles, math::Math,
+        random_permutation_u64,
     };
     use ark_bls12_381::Fr;
     use ark_ff::PrimeField;
     use ark_poly::{DenseMultilinearExtension, MultilinearExtension};
     use ark_std::test_rng;
-    use itertools::izip;
-    use std::iter::zip;
+    use rand_core::RngCore;
     use std::sync::Arc;
 
     fn test_permutation_check_helper<F>(
@@ -238,7 +348,8 @@ mod test {
         // prover
         let mut transcript = <PolyIOP<F> as PermutationCheck<F>>::init_transcript();
         transcript.append_message(b"testing", b"initializing transcript for testing")?;
-        let (proof, _) = <PolyIOP<F> as PermutationCheck<F>>::prove(fxs, gxs, perms, &mut transcript)?;
+        let (proof, _) =
+            <PolyIOP<F> as PermutationCheck<F>>::prove(fxs, gxs, perms, &mut transcript)?;
 
         // verifier
         let mut transcript = <PolyIOP<F> as PermutationCheck<F>>::init_transcript();
@@ -246,105 +357,134 @@ mod test {
         let perm_check_sub_claim =
             <PolyIOP<F> as PermutationCheck<F>>::verify(&proof, &mut transcript)?;
 
-        let (beta, gamma) = perm_check_sub_claim.challenges;
+        let mut f_openings = vec![];
+        let mut g_openings = vec![];
+        let mut perm_openings = vec![];
+        let mut offset = 0;
+        for subclaim in perm_check_sub_claim.subclaims.iter() {
+            let mut f_evals = fxs[offset..offset + subclaim.len]
+                .iter()
+                .map(|f| evaluate_opt(f, &subclaim.point))
+                .collect::<Vec<_>>();
+            let mut g_evals = gxs[offset..offset + subclaim.len]
+                .iter()
+                .map(|g| evaluate_opt(g, &subclaim.point))
+                .collect::<Vec<_>>();
+            let mut perm_evals = perms[offset..offset + subclaim.len]
+                .iter()
+                .map(|perm| evaluate_opt(perm, &subclaim.point))
+                .collect::<Vec<_>>();
 
-        let num_vars = fxs[0].num_vars();
-        let sid: F = (0..num_vars)
-            .map(|i| {
-                F::from_u64(i.pow2() as u64).unwrap() * perm_check_sub_claim.point[i]
-            })
-            .sum();
-
-        // check subclaim
-        if fxs.len() + gxs.len() != perm_check_sub_claim.expected_evaluations.len()
-        {
-            return Err(PolyIOPErrors::InvalidVerifier(
-                "wrong subclaim lengthes".to_string(),
-            ));
+            f_openings.append(&mut f_evals);
+            g_openings.append(&mut g_evals);
+            perm_openings.append(&mut perm_evals);
+            offset += subclaim.len;
         }
 
-        let subclaim_valid =
-        zip(
-            fxs.iter(),
-            perm_check_sub_claim.expected_evaluations[..fxs.len()].iter(),
+        <PolyIOP<F> as PermutationCheck<F>>::check_openings(
+            &perm_check_sub_claim,
+            &f_openings,
+            &g_openings,
+            &perm_openings,
         )
-        .enumerate()
-        .all(|(i, (poly, expected_evaluation))| {
-            evaluate_opt(poly, &perm_check_sub_claim.point)
-                + beta * (sid + F::from((i * (1 << num_vars)) as u64))
-                + gamma
-                == *expected_evaluation
-        })
-         && izip!(
-            gxs.iter(),
-            perms.iter(),
-            perm_check_sub_claim.expected_evaluations[fxs.len()..].iter(),
-        )
-        .all(|(poly, perm, expected_evaluation)| {
-            evaluate_opt(poly, &perm_check_sub_claim.point)
-                + beta * evaluate_opt(perm, &perm_check_sub_claim.point)
-                + gamma
-                == *expected_evaluation
-        });
-
-        if !subclaim_valid {
-            return Err(PolyIOPErrors::InvalidVerifier("wrong subclaim".to_string()));
-        }
-
-        Ok(())
     }
 
-    fn test_permutation_check(nv: usize) -> Result<(), PolyIOPErrors> {
+    fn generate_polys<R: RngCore>(
+        nv: &[usize],
+        rng: &mut R,
+    ) -> Vec<Arc<DenseMultilinearExtension<Fr>>> {
+        nv.iter()
+            .map(|x| Arc::new(DenseMultilinearExtension::rand(*x, rng)))
+            .collect()
+    }
+
+    fn test_permutation_check(
+        nv: Vec<usize>,
+        id_perms: Vec<Arc<DenseMultilinearExtension<Fr>>>,
+    ) -> Result<(), PolyIOPErrors> {
         let mut rng = test_rng();
-        let id_perms = identity_permutation_mles(nv, 2);
 
         {
             // good path: (w1, w2) is a permutation of (w1, w2) itself under the identify
             // map
-            let ws = vec![
-                Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)),
-                Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)),
-            ];
+            let ws = generate_polys(&nv, &mut rng);
             // perms is the identity map
             test_permutation_check_helper::<Fr>(&ws, &ws, &id_perms)?;
         }
 
         {
-            // good path: f = (w1, w2) is a permutation of g = (w2, w1) itself under a map
-            let mut fs = vec![
-                Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)),
-                Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)),
+            let fs = generate_polys(&nv, &mut rng);
+
+            let size0 = nv[0].pow2();
+
+            let perm = random_permutation_u64(nv[0].pow2() + nv[1].pow2(), &mut rng);
+            let perms = vec![
+                Arc::new(DenseMultilinearExtension::from_evaluations_vec(
+                    nv[0],
+                    perm[..size0]
+                        .iter()
+                        .map(|x| Fr::from_u64(*x).unwrap())
+                        .collect(),
+                )),
+                Arc::new(DenseMultilinearExtension::from_evaluations_vec(
+                    nv[1],
+                    perm[size0..]
+                        .iter()
+                        .map(|x| Fr::from_u64(*x).unwrap())
+                        .collect(),
+                )),
             ];
-            let gs = fs.clone();
-            fs.reverse();
-            // perms is the reverse identity map
-            let mut perms = id_perms.clone();
-            perms.reverse();
+
+            let get_f = |index: usize| {
+                if index < size0 {
+                    fs[0].evaluations[index]
+                } else {
+                    fs[1].evaluations[index - size0]
+                }
+            };
+
+            let g_evals = (
+                (0..size0)
+                    .map(|x| get_f(perm[x] as usize))
+                    .collect::<Vec<_>>(),
+                (size0..size0 + nv[1].pow2())
+                    .map(|x| get_f(perm[x] as usize))
+                    .collect::<Vec<_>>(),
+            );
+            let gs = vec![
+                Arc::new(DenseMultilinearExtension::from_evaluations_vec(
+                    nv[0], g_evals.0,
+                )),
+                Arc::new(DenseMultilinearExtension::from_evaluations_vec(
+                    nv[1], g_evals.1,
+                )),
+            ];
             test_permutation_check_helper::<Fr>(&fs, &gs, &perms)?;
         }
 
         {
             // bad path 1: w is a not permutation of w itself under a random map
-            let ws = vec![
-                Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)),
-                Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)),
-            ];
+            let ws = generate_polys(&nv, &mut rng);
             // perms is a random map
-            let perms = random_permutation_mles(nv, 2, &mut rng);
+            let perms = id_perms
+                .iter()
+                .map(|perm| {
+                    let mut evals = perm.evaluations.clone();
+                    evals.reverse();
+                    Arc::new(DenseMultilinearExtension::from_evaluations_vec(
+                        perm.num_vars(),
+                        evals,
+                    ))
+                })
+                .collect::<Vec<_>>();
 
             assert!(test_permutation_check_helper::<Fr>(&ws, &ws, &perms).is_err());
         }
 
         {
             // bad path 2: f is a not permutation of g under a identity map
-            let fs = vec![
-                Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)),
-                Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)),
-            ];
-            let gs = vec![
-                Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)),
-                Arc::new(DenseMultilinearExtension::rand(nv, &mut rng)),
-            ];
+            let fs = generate_polys(&nv, &mut rng);
+            let gs = generate_polys(&nv, &mut rng);
             // s_perm is the identity map
 
             assert!(test_permutation_check_helper::<Fr>(&fs, &gs, &id_perms).is_err());
@@ -355,10 +495,21 @@ mod test {
 
     #[test]
     fn test_trivial_polynomial() -> Result<(), PolyIOPErrors> {
-        test_permutation_check(1)
+        let id_perms = identity_permutation_mles(1, 2);
+        test_permutation_check(vec![1, 1], id_perms)
     }
     #[test]
     fn test_normal_polynomial() -> Result<(), PolyIOPErrors> {
-        test_permutation_check(5)
+        let id_perms = identity_permutation_mles(5, 2);
+        test_permutation_check(vec![5, 5], id_perms)
+    }
+
+    #[test]
+    fn test_different_lengths() -> Result<(), PolyIOPErrors> {
+        let id_perms = vec![
+            identity_permutation_mle(0, 5),
+            identity_permutation_mle(32, 4),
+        ];
+        test_permutation_check(vec![5, 4], id_perms)
     }
 }

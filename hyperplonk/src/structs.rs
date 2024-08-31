@@ -6,15 +6,18 @@
 
 //! Main module for the HyperPlonk PolyIOP.
 
-use crate::{custom_gate::CustomizedGates, prelude::HyperPlonkErrors, selectors::SelectorColumn};
+use crate::{custom_gate::CustomizedGates, lookup::HyperPlonkLookupPlugin, prelude::HyperPlonkErrors, selectors::SelectorColumn, utils::PcsDynamicProof};
 use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;
 use ark_poly::DenseMultilinearExtension;
-use ark_std::log2;
+use ark_std::{log2, Zero, One};
 use std::sync::Arc;
+use std::cmp::max;
+use std::fmt::Debug;
 use subroutines::{
     pcs::PolynomialCommitmentScheme,
     poly_iop::prelude::{PermutationCheck, ZeroCheck},
+    BatchProof,
 };
 
 /// The proof for the HyperPlonk PolyIOP, consists of the following:
@@ -23,16 +26,17 @@ use subroutines::{
 ///   - the zero-check proof for checking custom gate-satisfiability
 ///   - the permutation-check proof for checking the copy constraints
 #[derive(Clone, Debug, PartialEq)]
-pub struct HyperPlonkProof<E, PC, ZC, PCS>
+pub struct HyperPlonkProof<E, PC, ZC, PCS, Lookup>
 where
     E: Pairing,
     PC: PermutationCheck<E::ScalarField>,
     ZC: ZeroCheck<E::ScalarField>,
-    PCS: PolynomialCommitmentScheme<E>,
+    PCS: PolynomialCommitmentScheme<E, BatchProof = BatchProof<E, PCS>>,
+    Lookup: HyperPlonkLookupPlugin<E, PCS>,
 {
     // PCS commit for witnesses
     pub witness_commits: Vec<PCS::Commitment>,
-    pub batch_openings: PCS::BatchProof,
+    pub batch_openings: PcsDynamicProof<E, PCS>,
     // =======================================================================
     // IOP proofs
     // =======================================================================
@@ -40,6 +44,8 @@ where
     pub zero_check_proof: ZC::ZeroCheckProof,
     // the permutation check proof for copy constraints
     pub perm_check_proof: PC::PermutationProof,
+    // the lookup check proofs
+    pub lookup_proof: Lookup::Proof,
 }
 
 /// The HyperPlonk instance parameters, consists of the following:
@@ -48,11 +54,14 @@ where
 ///   - the customized gate function
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HyperPlonkParams {
-    /// the number of constraints
+    /// the number of constraints for gate_func
     pub num_constraints: usize,
+    pub num_lookup_constraints: Vec<usize>,
     /// number of public input
     // public input is only 1 column and is implicitly the first witness column.
-    // this size must not exceed number of constraints.
+    // this size must not exceed number of total constraints.
+    // Beware that public input must be wired to regular gates. If public input
+    // needs to be wired to lookup gates an no-op regular gate is necessary
     pub num_pub_input: usize,
     /// customized gate function
     pub gate_func: CustomizedGates,
@@ -64,19 +73,23 @@ impl HyperPlonkParams {
         log2(self.num_constraints) as usize
     }
 
+    pub fn max_num_variables<E: Pairing, PCS: PolynomialCommitmentScheme<E>, Lookup: HyperPlonkLookupPlugin<E, PCS>>(&self) -> usize {
+        max(log2(max(self.num_constraints, *self.num_lookup_constraints.iter().max().unwrap_or(&0usize))) as usize, Lookup::max_num_variables())
+    }
+
     /// number of selector columns
     pub fn num_selector_columns(&self) -> usize {
         self.gate_func.num_selector_columns()
     }
 
     /// number of witness columns
-    pub fn num_witness_columns(&self) -> usize {
-        self.gate_func.num_witness_columns()
+    pub fn num_witness_columns<E: Pairing, PCS: PolynomialCommitmentScheme<E>, Lookup: HyperPlonkLookupPlugin<E, PCS>>(&self) -> usize {
+        self.gate_func.num_witness_columns() + Lookup::num_witness_columns().iter().sum::<usize>()
     }
 
     /// evaluate the identical polynomial
-    pub fn eval_id_oracle<F: PrimeField>(&self, point: &[F]) -> Result<F, HyperPlonkErrors> {
-        let len = self.num_variables() + (log2(self.num_witness_columns()) as usize);
+    pub fn eval_id_oracle<E: Pairing, PCS: PolynomialCommitmentScheme<E>, Lookup: HyperPlonkLookupPlugin<E, PCS>>(&self, point: &[E::ScalarField]) -> Result<E::ScalarField, HyperPlonkErrors> {
+        let len = self.num_variables() + (log2(self.num_witness_columns::<E, PCS, Lookup>()) as usize);
         if point.len() != len {
             return Err(HyperPlonkErrors::InvalidParameters(format!(
                 "ID oracle point length = {}, expected {}",
@@ -85,8 +98,8 @@ impl HyperPlonkParams {
             )));
         }
 
-        let mut res = F::zero();
-        let mut base = F::one();
+        let mut res = E::ScalarField::zero();
+        let mut base = E::ScalarField::one();
         for &v in point.iter() {
             res += base * v;
             base += base;
@@ -112,14 +125,18 @@ impl<F: PrimeField> HyperPlonkIndex<F> {
         self.params.num_variables()
     }
 
+    pub fn max_num_variables<E: Pairing, PCS: PolynomialCommitmentScheme<E>, Lookup: HyperPlonkLookupPlugin<E, PCS>>(&self) -> usize {
+        self.params.max_num_variables::<E, PCS, Lookup>()
+    }
+
     /// number of selector columns
     pub fn num_selector_columns(&self) -> usize {
         self.params.num_selector_columns()
     }
 
     /// number of witness columns
-    pub fn num_witness_columns(&self) -> usize {
-        self.params.num_witness_columns()
+    pub fn num_witness_columns<E: Pairing, PCS: PolynomialCommitmentScheme<E>, Lookup: HyperPlonkLookupPlugin<E, PCS>>(&self) -> usize {
+        self.params.num_witness_columns::<E, PCS, Lookup>()
     }
 }
 
@@ -129,7 +146,7 @@ impl<F: PrimeField> HyperPlonkIndex<F> {
 ///   - the commitment to the selectors and permutations
 ///   - the parameters for polynomial commitment
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct HyperPlonkProvingKey<E: Pairing, PCS: PolynomialCommitmentScheme<E>> {
+pub struct HyperPlonkProvingKey<E: Pairing, PCS: PolynomialCommitmentScheme<E>, Lookup: HyperPlonkLookupPlugin<E, PCS>> {
     /// Hyperplonk instance parameters
     pub params: HyperPlonkParams,
     /// The preprocessed permutation polynomials
@@ -142,6 +159,8 @@ pub struct HyperPlonkProvingKey<E: Pairing, PCS: PolynomialCommitmentScheme<E>> 
     pub permutation_commitments: Vec<PCS::Commitment>,
     /// The parameters for PCS commitment
     pub pcs_param: PCS::ProverParam,
+
+    pub lookup_preprocessing: Lookup::Preprocessing,
 }
 
 /// The HyperPlonk verifying key, consists of the following:
@@ -149,7 +168,7 @@ pub struct HyperPlonkProvingKey<E: Pairing, PCS: PolynomialCommitmentScheme<E>> 
 ///   - the commitments to the preprocessed polynomials output by the indexer
 ///   - the parameters for polynomial commitment
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct HyperPlonkVerifyingKey<E: Pairing, PCS: PolynomialCommitmentScheme<E>> {
+pub struct HyperPlonkVerifyingKey<E: Pairing, PCS: PolynomialCommitmentScheme<E>, Lookup: HyperPlonkLookupPlugin<E, PCS>> {
     /// Hyperplonk instance parameters
     pub params: HyperPlonkParams,
     /// The parameters for PCS commitment
@@ -158,4 +177,6 @@ pub struct HyperPlonkVerifyingKey<E: Pairing, PCS: PolynomialCommitmentScheme<E>
     pub selector_commitments: Vec<PCS::Commitment>,
     /// Permutation oracles' commitments
     pub perm_commitments: Vec<PCS::Commitment>,
+
+    pub lookup_preprocessing: Lookup::Preprocessing,
 }

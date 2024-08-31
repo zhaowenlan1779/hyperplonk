@@ -7,11 +7,12 @@
 //! This module implements useful functions for the permutation check protocol.
 
 use crate::poly_iop::errors::PolyIOPErrors;
-use arithmetic::identity_permutation_mles;
+use arithmetic::{identity_permutation_mle, math::Math};
 use ark_ff::PrimeField;
 use ark_poly::DenseMultilinearExtension;
 use ark_std::{end_timer, start_timer};
 use std::sync::Arc;
+use std::mem::take;
 
 /// Returns the evaluations of two list of MLEs:
 /// - numerators = (a1, ..., ak)
@@ -33,20 +34,32 @@ pub(super) fn compute_leaves<F: PrimeField>(
     fxs: &[Arc<DenseMultilinearExtension<F>>],
     gxs: &[Arc<DenseMultilinearExtension<F>>],
     perms: &[Arc<DenseMultilinearExtension<F>>],
-) -> Result<(Vec<Vec<F>>, Vec<Vec<F>>), PolyIOPErrors> {
+) -> Result<Vec<Vec<Vec<F>>>, PolyIOPErrors> {
     let start = start_timer!(|| "compute numerators and denominators");
 
-    let num_vars = fxs[0].num_vars;
     let mut numerators = vec![];
     let mut denominators = vec![];
-    let s_ids = identity_permutation_mles::<F>(num_vars, fxs.len());
+    let mut leaves = vec![];
+
+    let mut shift = 0;
+    let mut last_num_var = fxs[0].num_vars;
     for l in 0..fxs.len() {
+        let num_vars = fxs[l].num_vars;
+        if num_vars != last_num_var {
+            numerators.append(&mut denominators);
+            leaves.push(take(&mut numerators));
+        }
+        last_num_var = num_vars;
+
+        let s_id = identity_permutation_mle::<F>(shift, num_vars);
+        shift += num_vars.pow2() as u64;
+
         let mut numerator_evals = vec![];
         let mut denominator_evals = vec![];
 
         for (&f_ev, (&g_ev, (&s_id_ev, &perm_ev))) in fxs[l]
             .iter()
-            .zip(gxs[l].iter().zip(s_ids[l].iter().zip(perms[l].iter())))
+            .zip(gxs[l].iter().zip(s_id.iter().zip(perms[l].iter())))
         {
             let numerator = f_ev + *beta * s_id_ev + gamma;
             let denominator = g_ev + *beta * perm_ev + gamma;
@@ -54,10 +67,14 @@ pub(super) fn compute_leaves<F: PrimeField>(
             numerator_evals.push(numerator);
             denominator_evals.push(denominator);
         }
+
         numerators.push(numerator_evals);
         denominators.push(denominator_evals);
     }
 
+    numerators.append(&mut denominators);
+    leaves.push(take(&mut numerators));
+
     end_timer!(start);
-    Ok((numerators, denominators))
+    Ok(leaves)
 }

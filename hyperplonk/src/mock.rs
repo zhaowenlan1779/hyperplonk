@@ -22,23 +22,6 @@ pub struct MockCircuit<F: PrimeField> {
 }
 
 impl<F: PrimeField> MockCircuit<F> {
-    /// Number of variables in a multilinear system
-    pub fn num_variables(&self) -> usize {
-        self.index.num_variables()
-    }
-
-    /// number of selector columns
-    pub fn num_selector_columns(&self) -> usize {
-        self.index.num_selector_columns()
-    }
-
-    /// number of witness columns
-    pub fn num_witness_columns(&self) -> usize {
-        self.index.num_witness_columns()
-    }
-}
-
-impl<F: PrimeField> MockCircuit<F> {
     /// Generate a mock plonk circuit for the input constraint size.
     pub fn new(num_constraints: usize, gate: &CustomizedGates) -> MockCircuit<F> {
         let mut rng = test_rng();
@@ -97,6 +80,7 @@ impl<F: PrimeField> MockCircuit<F> {
 
         let params = HyperPlonkParams {
             num_constraints,
+            num_lookup_constraints: vec![],
             num_pub_input: public_inputs.len(),
             gate_func: gate.clone(),
         };
@@ -116,7 +100,7 @@ impl<F: PrimeField> MockCircuit<F> {
     }
 
     pub fn is_satisfied(&self) -> bool {
-        for current_row in 0..self.num_variables() {
+        for current_row in 0..self.index.num_variables() {
             let mut cur = F::zero();
             for (coeff, q, wit) in self.index.params.gate_func.gates.iter() {
                 let mut cur_monomial = if *coeff < 0 {
@@ -201,6 +185,7 @@ mod test {
                 &pk,
                 &circuit.public_inputs,
                 &circuit.witnesses,
+                &(),
             )?;
 
         let verify =

@@ -153,6 +153,7 @@ fn bench_mock_circuit_zkp_helper(
                 &pk,
                 &circuit.public_inputs,
                 &circuit.witnesses,
+                &(),
             )?;
     }
     let t = start.elapsed().as_micros() / repetition as u128;
@@ -167,6 +168,7 @@ fn bench_mock_circuit_zkp_helper(
         &pk,
         &circuit.public_inputs,
         &circuit.witnesses,
+        &(),
     )?;
     //==========================================================
     // verify a proof

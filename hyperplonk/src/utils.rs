@@ -12,8 +12,11 @@ use arithmetic::{evaluate_opt, VirtualPolynomial};
 use ark_ec::pairing::Pairing;
 use ark_ff::PrimeField;
 use ark_poly::DenseMultilinearExtension;
+use itertools::Itertools;
+use std::iter::zip;
 use std::{borrow::Borrow, sync::Arc};
 use subroutines::pcs::{prelude::Commitment, PolynomialCommitmentScheme};
+use subroutines::BatchProof;
 use transcript::IOPTranscript;
 
 /// An accumulator structure that holds a polynomial and
@@ -87,6 +90,180 @@ where
             self.evals.as_ref(),
             transcript,
         )?)
+    }
+}
+
+/// An accumulator structure that automatically creates accumulators
+/// for different num_vars
+#[derive(Debug)]
+pub(super) struct PcsDynamicAccumulator<E: Pairing, PCS: PolynomialCommitmentScheme<E>> {
+    pub(crate) accumulators: Vec<(usize, PcsAccumulator<E, PCS>)>,
+    pub(crate) indices: Vec<usize>,
+}
+
+impl<E, PCS> PcsDynamicAccumulator<E, PCS>
+where
+    E: Pairing,
+    PCS: PolynomialCommitmentScheme<
+        E,
+        Polynomial = Arc<DenseMultilinearExtension<E::ScalarField>>,
+        Point = Vec<E::ScalarField>,
+        Evaluation = E::ScalarField,
+        Commitment = Commitment<E>,
+    >,
+{
+    pub(super) fn new() -> Self {
+        Self {
+            accumulators: vec![],
+            indices: vec![],
+        }
+    }
+
+    /// Push a new evaluation point into the accumulator
+    pub(super) fn insert_poly_and_points(
+        &mut self,
+        poly: &PCS::Polynomial,
+        commit: &PCS::Commitment,
+        point: &PCS::Point,
+    ) {
+        let acc_opt = self
+            .accumulators
+            .iter_mut()
+            .find_position(|(num_vars, _)| *num_vars == poly.num_vars);
+        if let Some((index, acc)) = acc_opt {
+            acc.1.insert_poly_and_points(poly, commit, point);
+            self.indices.push(index);
+        } else {
+            self.accumulators
+                .push((poly.num_vars, PcsAccumulator::new(poly.num_vars)));
+            self.accumulators
+                .last_mut()
+                .unwrap()
+                .1
+                .insert_poly_and_points(poly, commit, point);
+            self.indices.push(self.accumulators.len() - 1);
+        }
+    }
+
+    /// Batch open all the points over a merged polynomial.
+    /// A simple wrapper of PCS::multi_open
+    pub(super) fn multi_open(
+        &self,
+        prover_param: impl Borrow<PCS::ProverParam>,
+        transcript: &mut IOPTranscript<E::ScalarField>,
+    ) -> Result<PcsDynamicProof<E, PCS>, HyperPlonkErrors> {
+        let mut proofs = Vec::with_capacity(self.accumulators.len());
+        for (_, accumulator) in self.accumulators.iter() {
+            let proof = accumulator.multi_open(prover_param.borrow(), transcript)?;
+            proofs.push(proof);
+        }
+        Ok(PcsDynamicProof {
+            proofs,
+            indices: self.indices.clone(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PcsDynamicProof<E: Pairing, PCS: PolynomialCommitmentScheme<E>> {
+    pub(crate) proofs: Vec<PCS::BatchProof>,
+    pub(crate) indices: Vec<usize>,
+}
+
+pub(super) struct PcsDynamicOpenings<'a, E: Pairing, PCS: PolynomialCommitmentScheme<E>> {
+    pub(crate) proof: &'a PcsDynamicProof<E, PCS>,
+
+    // temporary state
+    pub(crate) proof_offsets: Vec<usize>,
+    pub(crate) offset: usize,
+}
+
+impl<'a, E, PCS> PcsDynamicOpenings<'a, E, PCS>
+where
+    E: Pairing,
+    PCS: PolynomialCommitmentScheme<E, BatchProof = BatchProof<E, PCS>>,
+{
+    pub(super) fn new(proof: &'a PcsDynamicProof<E, PCS>) -> Self {
+        Self {
+            proof,
+            proof_offsets: vec![0; proof.proofs.len()],
+            offset: 0,
+        }
+    }
+
+    pub(super) fn next_openings(&mut self, len: usize) -> Vec<E::ScalarField> {
+        let indices = if len == usize::MAX {
+            &self.proof.indices[self.offset..]
+        } else {
+            &self.proof.indices[self.offset..self.offset + len]
+        };
+        let result = indices
+            .iter()
+            .map(|index| {
+                let result = self.proof.proofs[*index].f_i_eval_at_point_i[self.proof_offsets[*index]];
+                self.proof_offsets[*index] += 1;
+                result
+            })
+            .collect();
+        if len == usize::MAX {
+            self.offset = usize::MAX;
+        } else {
+            self.offset += len;
+        }
+        result
+    }
+}
+
+/// An accumulator structure that automatically creates accumulators
+/// for different num_vars
+#[derive(Debug)]
+pub(super) struct PcsDynamicVerifier<E: Pairing, PCS: PolynomialCommitmentScheme<E>> {
+    pub(crate) items: Vec<(usize, Vec<PCS::Commitment>, Vec<Vec<E::ScalarField>>)>,
+}
+
+impl<E, PCS> PcsDynamicVerifier<E, PCS>
+where
+    E: Pairing,
+    PCS: PolynomialCommitmentScheme<
+        E,
+        Polynomial = Arc<DenseMultilinearExtension<E::ScalarField>>,
+        Point = Vec<E::ScalarField>,
+        Evaluation = E::ScalarField,
+        Commitment = Commitment<E>,
+    >,
+{
+    pub(super) fn new() -> Self {
+        Self { items: vec![] }
+    }
+
+    /// Push a new evaluation point into the accumulator
+    pub(super) fn insert_comm_and_points(&mut self, commit: PCS::Commitment, point: PCS::Point) {
+        if let Some((_, comms, points)) =
+            self.items.iter_mut().find(|(nv, _, _)| *nv == point.len())
+        {
+            comms.push(commit);
+            points.push(point);
+        } else {
+            self.items.push((point.len(), vec![commit], vec![point]));
+        }
+    }
+
+    /// Batch open all the points over a merged polynomial.
+    /// A simple wrapper of PCS::multi_open
+    pub(super) fn batch_verify(
+        &self,
+        verifier_param: impl Borrow<PCS::VerifierParam>,
+        batch_proof: &[PCS::BatchProof],
+        transcript: &mut IOPTranscript<E::ScalarField>,
+    ) -> Result<bool, HyperPlonkErrors> {
+        for (proof, (_, comms, points)) in zip(batch_proof.iter(), self.items.iter()) {
+            let res =
+                PCS::batch_verify(verifier_param.borrow(), comms, points, &proof, transcript)?;
+            if !res {
+                return Ok(res);
+            }
+        }
+        Ok(true)
     }
 }
 

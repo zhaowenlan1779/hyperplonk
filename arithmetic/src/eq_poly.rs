@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 use ark_ff::PrimeField;
 use rayon::prelude::*;
 
