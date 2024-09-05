@@ -17,7 +17,7 @@ use arithmetic::unipoly::{CompressedUniPoly, UniPoly};
 // Instead the struct itself can hold arbitrary state as long as it can bind varaibles
 // and produce a cubic polynomial on demand.
 // Used by the layered circuit implementation for rational sumcheck
-pub trait BatchedCubicSumcheckInstance<F: PrimeField, FinalClaimType> : Sync {
+pub trait BatchedCubicSumcheckInstance<F: PrimeField, FinalClaimType = F> : Sync {
     fn num_rounds(&self) -> usize;
     fn bind(&mut self, eq_poly: &mut DenseMultilinearExtension<F>, r: &F);
     fn compute_cubic(

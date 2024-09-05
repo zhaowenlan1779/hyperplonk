@@ -6,32 +6,28 @@
 
 //! Main module for the Permutation Check protocol
 
-use crate::poly_iop::{
-    errors::PolyIOPErrors,
-    rational_sumcheck::layered_circuit::{
-        BatchedDenseRationalSum, BatchedRationalSum, BatchedRationalSumProof,
-    },
-    PolyIOP,
-};
-use arithmetic::{math::Math, Fraction};
+use crate::poly_iop::{errors::PolyIOPErrors, PolyIOP};
+use arithmetic::math::Math;
 use ark_ff::PrimeField;
 use ark_poly::DenseMultilinearExtension;
 use ark_std::{end_timer, start_timer};
 use itertools::izip;
 use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
-use std::iter::zip;
-use std::mem::take;
-use std::sync::Arc;
+use std::{iter::zip, mem::take, sync::Arc};
 use transcript::IOPTranscript;
 use util::compute_leaves;
+
+mod layered_circuit;
+
+use layered_circuit::{BatchedDenseGrandProduct, BatchedGrandProduct, BatchedGrandProductProof};
 
 pub struct PermutationCheckProofSingle<F>
 where
     F: PrimeField,
 {
-    pub proof: BatchedRationalSumProof<F>,
-    pub f_claims: Vec<Fraction<F>>,
-    pub g_claims: Vec<Fraction<F>>,
+    pub proof: BatchedGrandProductProof<F>,
+    pub f_claims: Vec<F>,
+    pub g_claims: Vec<F>,
 }
 
 pub struct PermutationCheckProof<F>
@@ -170,11 +166,10 @@ where
             .map(|mut leave| {
                 let leave_len = leave.len();
                 let batched_circuit =
-                    <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::construct((
-                        vec![vec![F::one(); leave[0].len()]; leave.len()],
-                        take(&mut leave),
+                    <BatchedDenseGrandProduct<F> as BatchedGrandProduct<F>>::construct(take(
+                        &mut leave,
                     ));
-                let mut f_claims = <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::claims(
+                let mut f_claims = <BatchedDenseGrandProduct<F> as BatchedGrandProduct<F>>::claims(
                     &batched_circuit,
                 );
                 let g_claims = f_claims.split_off(leave_len / 2);
@@ -186,7 +181,7 @@ where
         let mut points = Vec::with_capacity(to_prove.len());
         for (batched_circuit, f_claims, g_claims) in to_prove.iter_mut() {
             let (proof, point) =
-                <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::prove_rational_sum(
+                <BatchedDenseGrandProduct<F> as BatchedGrandProduct<F>>::prove_grand_product(
                     batched_circuit,
                     transcript,
                 );
@@ -211,31 +206,20 @@ where
         let beta = transcript.get_and_append_challenge(b"beta")?;
         let gamma = transcript.get_and_append_challenge(b"gamma")?;
 
-        let (sum_f, sum_g) = proof
+        let (prod_f, prod_g) = proof
             .proofs
             .par_iter()
             .map(|proof| {
-                let sum_f = proof
-                    .f_claims
-                    .iter()
-                    .fold(Fraction::zero(), |acc, x| Fraction::rational_add(acc, *x));
-                let sum_g = proof
-                    .g_claims
-                    .iter()
-                    .fold(Fraction::zero(), |acc, x| Fraction::rational_add(acc, *x));
-                (sum_f, sum_g)
+                let prod_f = proof.f_claims.iter().product();
+                let prod_g = proof.g_claims.iter().product();
+                (prod_f, prod_g)
             })
             .reduce(
-                || (Fraction::zero(), Fraction::zero()),
-                |(acc_f, acc_g), (f, g)| {
-                    (
-                        Fraction::rational_add(acc_f, f),
-                        Fraction::rational_add(acc_g, g),
-                    )
-                },
+                || (F::one(), F::one()),
+                |(acc_f, acc_g), (f, g)| (acc_f * f, acc_g * g),
             );
 
-        if sum_f.p * sum_g.q != sum_g.p * sum_f.q {
+        if prod_f != prod_g {
             return Err(PolyIOPErrors::InvalidProof(format!(
                 "Permutation check claims are inconsistent"
             )));
@@ -244,20 +228,15 @@ where
         let mut subclaims = Vec::with_capacity(proof.proofs.len());
         for proof in proof.proofs.iter() {
             let (claims, point) =
-                <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F>>::verify_rational_sum(
+                <BatchedDenseGrandProduct<F> as BatchedGrandProduct<F>>::verify_grand_product(
                     &proof.proof,
                     &[&proof.f_claims[..], &proof.g_claims[..]].concat(),
                     transcript,
                 );
 
-            if claims.iter().any(|claim| claim.p != F::one()) {
-                return Err(PolyIOPErrors::InvalidProof(format!(
-                    "Permutation check claim opened to non-1 value on numerator"
-                )));
-            }
             subclaims.push(PermutationCheckSubClaimSingle {
                 point,
-                expected_evaluations: claims.iter().map(|claim| claim.q).collect(),
+                expected_evaluations: claims,
                 len: proof.f_claims.len(),
             });
         }
