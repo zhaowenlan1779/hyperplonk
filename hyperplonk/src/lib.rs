@@ -6,6 +6,8 @@
 
 //! Main module for the HyperPlonk SNARK.
 
+#![feature(macro_metavar_expr)]
+
 use ark_ec::pairing::Pairing;
 use errors::HyperPlonkErrors;
 use lookup::{HyperPlonkLookupPlugin, HyperPlonkLookupPluginNull};

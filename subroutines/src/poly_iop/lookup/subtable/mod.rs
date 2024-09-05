@@ -29,6 +29,8 @@ pub trait JoltSubtableSet<F: PrimeField>:
     }
 }
 
+pub mod and;
+pub mod or;
 pub mod xor;
 
 #[cfg(test)]

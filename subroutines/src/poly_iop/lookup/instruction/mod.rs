@@ -118,6 +118,8 @@ impl From<Range<usize>> for SubtableIndices {
     }
 }
 
+pub mod and;
+pub mod or;
 pub mod xor;
 
 #[cfg(test)]

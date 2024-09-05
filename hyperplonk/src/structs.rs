@@ -14,6 +14,7 @@ use ark_std::{log2, Zero, One};
 use std::sync::Arc;
 use std::cmp::max;
 use std::fmt::Debug;
+use std::iter::zip;
 use subroutines::{
     pcs::PolynomialCommitmentScheme,
     poly_iop::prelude::{PermutationCheck, ZeroCheck},
@@ -84,7 +85,13 @@ impl HyperPlonkParams {
 
     /// number of witness columns
     pub fn num_witness_columns<E: Pairing, PCS: PolynomialCommitmentScheme<E>, Lookup: HyperPlonkLookupPlugin<E, PCS>>(&self) -> usize {
-        self.gate_func.num_witness_columns() + Lookup::num_witness_columns().iter().sum::<usize>()
+        let mut sum = self.gate_func.num_witness_columns();
+        for (&num_constraints, &num_witnesses) in zip(self.num_lookup_constraints.iter(), Lookup::num_witness_columns().iter()) {
+            if num_constraints != 0 {
+                sum += num_witnesses;
+            }
+        }
+        sum
     }
 
     /// evaluate the identical polynomial

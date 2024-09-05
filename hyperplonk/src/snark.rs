@@ -24,7 +24,7 @@ use std::{marker::PhantomData, sync::Arc, iter::zip, mem::take};
 use subroutines::{
     pcs::prelude::{Commitment, PolynomialCommitmentScheme},
     poly_iop::{
-        prelude::{PermutationCheck, ZeroCheck, instruction::xor::XORInstruction},
+        prelude::{PermutationCheck, ZeroCheck},
         PolyIOP,
     },
     BatchProof,
@@ -70,8 +70,15 @@ where
         let num_witness_columns = vec![vec![index.params.gate_func.num_witness_columns()], Lookup::num_witness_columns()].concat();
         let num_constraints = vec![&[index.params.num_constraints][..], &index.params.num_lookup_constraints].concat();
     
+        if num_witness_columns.len() != num_constraints.len() {
+            return Err(HyperPlonkErrors::InvalidParameters(format!("num_witness_columns.len() = {}, num_constraints.len() = {}", num_witness_columns.len(), num_constraints.len())));
+        }
+
         let mut current_index = 0;
         for (&witnesses, &constraints) in zip(num_witness_columns.iter(), num_constraints.iter()) {
+            if constraints == 0 { // witnesses = 0
+                continue
+            }
             let num_vars = log2(constraints) as usize;
             let length = num_vars.pow2();
             for _ in 0..witnesses {
@@ -461,9 +468,10 @@ where
         )?;
 
         let zero_check_point = zero_check_sub_claim.point;
+        let num_gate_witnesses = vk.params.gate_func.num_witness_columns();
 
         // check zero check subclaim
-        let f_eval = eval_f(&vk.params.gate_func, selector_evals, witness_gate_evals)?;
+        let f_eval = eval_f(&vk.params.gate_func, selector_evals, &witness_gate_evals[..num_gate_witnesses])?;
         if f_eval != zero_check_sub_claim.expected_evaluation {
             return Err(HyperPlonkErrors::InvalidProof(
                 "zero check evaluation failed".to_string(),
@@ -475,7 +483,6 @@ where
         let step = start_timer!(|| "verify lookup check");
 
         // Verify lookup
-        let num_gate_witnesses = vk.params.gate_func.num_witness_columns();
         let mut lookup_opening_points = Lookup::verify(&proof.lookup_proof, &witness_gate_evals[num_gate_witnesses..], 
         lookup_evals, &mut transcript)?;
 
@@ -575,12 +582,16 @@ where
 mod tests {
     use super::*;
     use crate::{
-        custom_gate::CustomizedGates, lookup::HyperPlonkLookupPluginSingle, selectors::SelectorColumn, structs::HyperPlonkParams, witness::WitnessColumn
+        custom_gate::CustomizedGates, jolt_lookup, selectors::SelectorColumn, structs::HyperPlonkParams, witness::WitnessColumn
     };
     use arithmetic::{identity_permutation, random_permutation, random_permutation_raw};
     use ark_bls12_381::Bls12_381;
     use ark_std::{test_rng, One};
     use subroutines::pcs::prelude::MultilinearKzgPCS;
+    use subroutines::instruction::{
+        xor::XORInstruction,
+        and::ANDInstruction,
+        or::ORInstruction};
 
     #[test]
     fn test_hyperplonk_e2e() -> Result<(), HyperPlonkErrors> {
@@ -701,6 +712,15 @@ mod tests {
     }
 
     
+    const C : usize = 2;
+    const M : usize = 1 << 8;
+
+    jolt_lookup!{ LookupPlugin, C, M ;
+        XORInstruction,
+        ORInstruction,
+        ANDInstruction
+    }
+
     #[test]
     fn test_hyperplonk_lookup() -> Result<(), HyperPlonkErrors> {
         // Example:
@@ -736,11 +756,11 @@ mod tests {
         // generate index
         let params = HyperPlonkParams {
             num_constraints,
-            num_lookup_constraints: vec![5],
+            num_lookup_constraints: vec![5, 0, 3],
             num_pub_input,
             gate_func,
         };
-        let perm_len = (1u64 << nv) * (num_witnesses as u64) + (1u64 << 3) * 3;
+        let perm_len = (1u64 << nv) * (num_witnesses as u64) + (1u64 << 3) * 3 + (1u64 << 2) * 3;
         let permutation = (0..perm_len).map(E::ScalarField::from).collect();
         let q1 = SelectorColumn(vec![
             E::ScalarField::one(),
@@ -755,17 +775,19 @@ mod tests {
         };
 
         // generate pk and vks
-        let ops = vec![
+        let ops = (Some(vec![
             XORInstruction(0, 1),
             XORInstruction(101, 101),
             XORInstruction(202, 1),
             XORInstruction(220, 1),
             XORInstruction(220, 1),
-        ];
-        const C: usize = 2;
-        const M: usize = 1 << 8;
+        ]), None, Some(vec![
+            ANDInstruction(113, 5),
+            ANDInstruction(220, 7),
+            ANDInstruction(221, 9),
+        ]));
         let (pk, vk) =
-            <PolyIOP<E::ScalarField> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>, HyperPlonkLookupPluginSingle<XORInstruction, C, M>>>::preprocess(
+            <PolyIOP<E::ScalarField> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>, LookupPlugin>>::preprocess(
                 &index, &pcs_srs,
             )?;
 
@@ -787,7 +809,7 @@ mod tests {
         let pi = w1.clone();
 
         // generate a proof and verify
-        let proof = <PolyIOP<E::ScalarField> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>, HyperPlonkLookupPluginSingle<XORInstruction, C, M>>>::prove(
+        let proof = <PolyIOP<E::ScalarField> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>, LookupPlugin>>::prove(
             &pk,
             &pi.0,
             &[w1.clone(), w2.clone()],
@@ -795,7 +817,7 @@ mod tests {
         )?;
 
         let verify =
-            <PolyIOP<E::ScalarField> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>, HyperPlonkLookupPluginSingle<XORInstruction, C, M>>>::verify(
+            <PolyIOP<E::ScalarField> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>, LookupPlugin>>::verify(
                 &vk, &pi.0, &proof,
             )?;
         assert!(verify);
@@ -806,20 +828,20 @@ mod tests {
         bad_index.permutation = rand_perm;
         // generate pk and vks
         let (_, bad_vk) =
-            <PolyIOP<E::ScalarField> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>, HyperPlonkLookupPluginSingle<XORInstruction, C, M>>>::preprocess(
+            <PolyIOP<E::ScalarField> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>, LookupPlugin>>::preprocess(
                 &bad_index, &pcs_srs,
             )?;
         assert!(!<PolyIOP<E::ScalarField> as HyperPlonkSNARK<
             E,
             MultilinearKzgPCS<E>,
-            HyperPlonkLookupPluginSingle<XORInstruction, C, M>,
+            LookupPlugin,
         >>::verify(&bad_vk, &pi.0, &proof,)?);
 
         // bad path 2: wrong witness
         let mut w1_bad = w1;
         w1_bad.0[0] = E::ScalarField::one();
         assert!(
-            <PolyIOP<E::ScalarField> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>, HyperPlonkLookupPluginSingle<XORInstruction, C, M>>>::prove(
+            <PolyIOP<E::ScalarField> as HyperPlonkSNARK<E, MultilinearKzgPCS<E>, LookupPlugin>>::prove(
                 &pk,
                 &pi.0,
                 &[w1_bad, w2],
