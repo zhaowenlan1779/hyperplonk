@@ -141,11 +141,11 @@ impl<F: PrimeField> VirtualPolynomial<F> {
         let mle_list: Vec<Arc<DenseMultilinearExtension<F>>> = mle_list.into_iter().collect();
         let mut indexed_product = Vec::with_capacity(mle_list.len());
 
-        if mle_list.is_empty() {
-            return Err(ArithErrors::InvalidParameters(
-                "input mle_list is empty".to_string(),
-            ));
-        }
+        // if mle_list.is_empty() {
+        //     return Err(ArithErrors::InvalidParameters(
+        //         "input mle_list is empty".to_string(),
+        //     ));
+        // }
 
         self.aux_info.max_degree = max(self.aux_info.max_degree, mle_list.len());
 
