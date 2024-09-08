@@ -17,7 +17,7 @@ use ark_std::{
     start_timer,
 };
 use rayon::prelude::*;
-use std::{cmp::max, collections::HashMap, marker::PhantomData, ops::Add, sync::Arc};
+use std::{cmp::max, collections::HashMap, marker::PhantomData, ops::{Add, AddAssign}, sync::Arc};
 
 #[rustfmt::skip]
 /// A virtual polynomial is a sum of products of multilinear polynomials;
@@ -71,11 +71,9 @@ pub struct VPAuxInfo<F: PrimeField> {
     pub phantom: PhantomData<F>,
 }
 
-impl<F: PrimeField> Add for &VirtualPolynomial<F> {
-    type Output = VirtualPolynomial<F>;
-    fn add(self, other: &VirtualPolynomial<F>) -> Self::Output {
+impl<F: PrimeField> AddAssign<&VirtualPolynomial<F>> for VirtualPolynomial<F> {
+    fn add_assign(&mut self, other: &VirtualPolynomial<F>) {
         let start = start_timer!(|| "virtual poly add");
-        let mut res = self.clone();
         for products in other.products.iter() {
             let cur: Vec<Arc<DenseMultilinearExtension<F>>> = products
                 .1
@@ -83,10 +81,18 @@ impl<F: PrimeField> Add for &VirtualPolynomial<F> {
                 .map(|&x| other.flattened_ml_extensions[x].clone())
                 .collect();
 
-            res.add_mle_list(cur, products.0)
+            self.add_mle_list(cur, products.0)
                 .expect("add product failed");
         }
         end_timer!(start);
+    }
+}
+
+impl<F: PrimeField> Add for &VirtualPolynomial<F> {
+    type Output = VirtualPolynomial<F>;
+    fn add(self, other: &VirtualPolynomial<F>) -> Self::Output {
+        let mut res = self.clone();
+        res += other;
         res
     }
 }

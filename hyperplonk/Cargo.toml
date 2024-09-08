@@ -52,3 +52,4 @@ print-trace = [
     "arithmetic/print-trace",
     "subroutines/print-trace"
     ] 
+rational_sumcheck_piop = ["subroutines/rational_sumcheck_piop"]

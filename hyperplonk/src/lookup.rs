@@ -3,7 +3,8 @@ use ark_poly::DenseMultilinearExtension;
 use ark_std::log2;
 use std::{iter::zip, marker::PhantomData, sync::Arc};
 use subroutines::{
-    pcs::prelude::PolynomialCommitmentScheme, Commitment, JoltInstruction, LookupCheck, PolyIOP, PolyIOPErrors
+    pcs::prelude::PolynomialCommitmentScheme, Commitment, JoltInstruction, LookupCheck, PolyIOP,
+    PolyIOPErrors,
 };
 use transcript::IOPTranscript;
 
@@ -113,6 +114,19 @@ where
                 &alpha,
             );
 
+        #[cfg(feature = "rational_sumcheck_piop")]
+        let (proof, r_f, r_g, r_z, r_primary_sumcheck, f_inv, g_inv) =
+            <PolyIOP<E::ScalarField> as LookupCheck<E, PCS, Instruction, C, M>>::prove(
+                preprocessing,
+                pcs_param,
+                &mut polys,
+                &alpha,
+                &tau,
+                transcript,
+            )
+            .unwrap();
+
+        #[cfg(not(feature = "rational_sumcheck_piop"))]
         let (proof, r_f, r_g, r_z, r_primary_sumcheck) =
             <PolyIOP<E::ScalarField> as LookupCheck<E, PCS, Instruction, C, M>>::prove(
                 preprocessing,
@@ -124,8 +138,15 @@ where
             )
             .unwrap();
 
+        #[cfg(feature = "rational_sumcheck_piop")]
+        let mut regular_openings = Vec::with_capacity(
+            polys.dim.len() + polys.m.len() + 2 * polys.E_polys.len() + f_inv.len() + g_inv.len(),
+        );
+
+        #[cfg(not(feature = "rational_sumcheck_piop"))]
         let mut regular_openings =
             Vec::with_capacity(polys.dim.len() + polys.m.len() + 2 * polys.E_polys.len());
+
         for (poly, comm) in zip(polys.m.iter(), proof.commitment.m_commitment.iter()) {
             regular_openings.push((poly.clone(), *comm, r_f.clone()));
         }
@@ -138,6 +159,15 @@ where
         for (poly, comm) in zip(polys.E_polys.iter(), proof.commitment.E_commitment.iter()) {
             regular_openings.push((poly.clone(), *comm, r_z.clone()));
         }
+        #[cfg(feature = "rational_sumcheck_piop")]
+        {
+            for (poly, comm) in zip(f_inv.iter(), proof.logup_checking.f_inv_comm.iter()) {
+                regular_openings.push((poly.clone(), *comm, r_f.clone()));
+            }
+            for (poly, comm) in zip(g_inv.iter(), proof.logup_checking.g_inv_comm.iter()) {
+                regular_openings.push((poly.clone(), *comm, r_g.clone()));
+            }
+        }
 
         (
             proof,
@@ -148,9 +178,16 @@ where
         )
     }
     fn num_regular_openings(proof: &Self::Proof) -> usize {
-        proof.commitment.dim_commitment.len()
+        let mut len = proof.commitment.dim_commitment.len()
             + proof.commitment.m_commitment.len()
-            + 2 * proof.commitment.E_commitment.len()
+            + 2 * proof.commitment.E_commitment.len();
+
+        #[cfg(feature = "rational_sumcheck_piop")]
+        {
+            len += proof.logup_checking.f_inv_comm.len() + proof.logup_checking.g_inv_comm.len();
+        }
+
+        len
     }
     fn verify(
         proof: &Self::Proof,
@@ -166,34 +203,86 @@ where
         let subclaim = <PolyIOP<E::ScalarField> as LookupCheck<E, PCS, Instruction, C, M>>::verify(
             proof, transcript,
         )?;
+
+        let mut offset = 0;
+        let mut next_openings = |len| {
+            let result = &regular_openings[offset..offset + len];
+            offset += len;
+            result
+        };
+
+        let m_openings = next_openings(proof.commitment.m_commitment.len());
+        let dim_openings = next_openings(proof.commitment.dim_commitment.len());
+        let E_openings = next_openings(2 * proof.commitment.E_commitment.len());
+
+        #[cfg(feature = "rational_sumcheck_piop")]
+        {
+            let f_inv_openings = next_openings(proof.logup_checking.f_inv_comm.len());
+            let g_inv_openings = next_openings(proof.logup_checking.g_inv_comm.len());
+            <PolyIOP<E::ScalarField> as LookupCheck<E, PCS, Instruction, C, M>>::check_openings(
+                &subclaim,
+                dim_openings,
+                E_openings,
+                m_openings,
+                &witness_openings,
+                f_inv_openings,
+                g_inv_openings,
+                &alpha,
+                &tau,
+            )?;
+        }
+
+        #[cfg(not(feature = "rational_sumcheck_piop"))]
         <PolyIOP<E::ScalarField> as LookupCheck<E, PCS, Instruction, C, M>>::check_openings(
             &subclaim,
-            &regular_openings[proof.commitment.m_commitment.len()
-                ..proof.commitment.dim_commitment.len() + proof.commitment.m_commitment.len()],
-            &regular_openings
-                [proof.commitment.dim_commitment.len() + proof.commitment.m_commitment.len()..],
-            &regular_openings[..proof.commitment.m_commitment.len()],
+            dim_openings,
+            E_openings,
+            m_openings,
             &witness_openings,
             &alpha,
             &tau,
         )?;
 
-        let mut regular_openings = Vec::with_capacity(
-            proof.commitment.dim_commitment.len()
-                + proof.commitment.m_commitment.len()
-                + 2 * proof.commitment.E_commitment.len(),
-        );
+        let mut regular_openings = Vec::with_capacity(Self::num_regular_openings(proof));
+
+        #[cfg(feature = "rational_sumcheck_piop")]
+        let r_f = &subclaim
+            .logup_checking
+            .f_subclaims
+            .sum_check_sub_claim
+            .point;
+        #[cfg(feature = "rational_sumcheck_piop")]
+        let r_g = &subclaim
+            .logup_checking
+            .g_subclaims
+            .sum_check_sub_claim
+            .point;
+
+        #[cfg(not(feature = "rational_sumcheck_piop"))]
+        let r_f = &subclaim.logup_checking.point_f;
+        #[cfg(not(feature = "rational_sumcheck_piop"))]
+        let r_g = &subclaim.logup_checking.point_g;
+
         for comm in proof.commitment.m_commitment.iter() {
-            regular_openings.push((*comm, subclaim.logup_checking.point_f.clone()));
+            regular_openings.push((*comm, r_f.clone()));
         }
         for comm in proof.commitment.dim_commitment.iter() {
-            regular_openings.push((*comm, subclaim.logup_checking.point_g.clone()));
+            regular_openings.push((*comm, r_g.clone()));
         }
         for comm in proof.commitment.E_commitment.iter() {
-            regular_openings.push((*comm, subclaim.logup_checking.point_g.clone()));
+            regular_openings.push((*comm, r_g.clone()));
         }
         for comm in proof.commitment.E_commitment.iter() {
             regular_openings.push((*comm, subclaim.r_z.clone()));
+        }
+        #[cfg(feature = "rational_sumcheck_piop")]
+        {
+            for comm in proof.logup_checking.f_inv_comm.iter() {
+                regular_openings.push((*comm, r_f.clone()));
+            }
+            for comm in proof.logup_checking.g_inv_comm.iter() {
+                regular_openings.push((*comm, r_g.clone()));
+            }
         }
 
         Ok(HyperPlonkLookupVerifierOpeningPoints {
@@ -234,7 +323,7 @@ macro_rules! combine_lookup_plugins {
                 witness_vecs.concat()
             }
             fn num_witness_columns() -> Vec<usize> {
-                let witness_columns : Vec<Vec<usize>> = 
+                let witness_columns : Vec<Vec<usize>> =
                     vec![$(<$plugin as $crate::lookup::HyperPlonkLookupPlugin<E, PCS>>::num_witness_columns()),*];
                 witness_columns.concat()
             }
@@ -290,7 +379,7 @@ macro_rules! combine_lookup_plugins {
                 $(if let Some(proof) = &proof.${index()} {
                     let num_witnesses : usize = <$plugin as $crate::lookup::HyperPlonkLookupPlugin<E, PCS>>::num_witness_columns().iter().sum();
                     let num_regular_openings = <$plugin as $crate::lookup::HyperPlonkLookupPlugin<E, PCS>>::num_regular_openings(proof);
-                    
+
                     let mut openings = <$plugin as $crate::lookup::HyperPlonkLookupPlugin<E, PCS>>::verify(proof,
                         &witness_openings[witness_index..witness_index + num_witnesses],
                         &regular_openings[regular_index..regular_index + num_regular_openings],
@@ -321,14 +410,14 @@ macro_rules! jolt_lookup {
 mod tests {
     use super::*;
     use subroutines::instruction::xor::XORInstruction;
-    
+
     combine_lookup_plugins! { HyperPlonkLookupPluginTest1 : HyperPlonkLookupPluginSingle<XORInstruction, 4, 65536>}
     combine_lookup_plugins! { HyperPlonkLookupPluginTest2 : HyperPlonkLookupPluginSingle<XORInstruction, 4, 65536>,
-        HyperPlonkLookupPluginSingle<XORInstruction, 4, 65536>}
+    HyperPlonkLookupPluginSingle<XORInstruction, 4, 65536>}
     combine_lookup_plugins! { HyperPlonkLookupPluginTest4 : HyperPlonkLookupPluginSingle<XORInstruction, 4, 65536>,
-            HyperPlonkLookupPluginSingle<XORInstruction, 4, 65536>,
-            HyperPlonkLookupPluginSingle<XORInstruction, 4, 65536>,
-            HyperPlonkLookupPluginSingle<XORInstruction, 4, 65536>}
+    HyperPlonkLookupPluginSingle<XORInstruction, 4, 65536>,
+    HyperPlonkLookupPluginSingle<XORInstruction, 4, 65536>,
+    HyperPlonkLookupPluginSingle<XORInstruction, 4, 65536>}
     jolt_lookup! { JoltLookupTest1, 4, 65536; XORInstruction }
     jolt_lookup! { JoltLookupTest3, 4, 65536; XORInstruction, XORInstruction, XORInstruction }
 }
