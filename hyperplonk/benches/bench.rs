@@ -53,7 +53,7 @@ fn main() -> Result<(), HyperPlonkErrors> {
 
 fn read_srs() -> Result<MultilinearUniversalParams<Bls12_381>, io::Error> {
     let mut f = File::open("srs.params")?;
-    Ok(MultilinearUniversalParams::<Bls12_381>::deserialize_compressed_unchecked(&mut f).unwrap())
+    Ok(MultilinearUniversalParams::<Bls12_381>::deserialize_uncompressed_unchecked(&mut f).unwrap())
 }
 
 fn write_srs(pcs_srs: &MultilinearUniversalParams<Bls12_381>) {
