@@ -39,7 +39,7 @@ fn main() -> Result<(), HyperPlonkErrors> {
         }
     };
     let args: Vec<_> = std::env::args().collect();
-    assert!(args.len() >= 3);
+    assert!(args.len() >= 2);
     if args[1] == "--jellyfish" {
         let nv = str::parse(&args[2]).unwrap();
         bench_jellyfish_plonk(&pcs_srs, nv)?;
