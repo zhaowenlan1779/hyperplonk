@@ -21,12 +21,7 @@ use subroutines::{
     poly_iop::PolyIOP,
 };
 
-const SUPPORTED_SIZE: usize = 20;
-const MIN_NUM_VARS: usize = 8;
-const MAX_NUM_VARS: usize = 20;
-const MIN_CUSTOM_DEGREE: usize = 1;
-const MAX_CUSTOM_DEGREE: usize = 32;
-const HIGH_DEGREE_TEST_NV: usize = 15;
+const SUPPORTED_SIZE: usize = 26;
 
 fn main() -> Result<(), HyperPlonkErrors> {
     let thread = rayon::current_num_threads();
@@ -43,15 +38,15 @@ fn main() -> Result<(), HyperPlonkErrors> {
             },
         }
     };
-    bench_jellyfish_plonk(&pcs_srs, thread)?;
-    println!();
-    bench_vanilla_plonk(&pcs_srs, thread)?;
-    println!();
-    for degree in MIN_CUSTOM_DEGREE..=MAX_CUSTOM_DEGREE {
-        bench_high_degree_plonk(&pcs_srs, degree, thread)?;
-        println!();
+    let args: Vec<_> = std::env::args().collect();
+    assert!(args.len() >= 3);
+    if args[1] == "--jellyfish" {
+        let nv = str::parse(&args[2]).unwrap();
+        bench_jellyfish_plonk(&pcs_srs, nv)?;
+    } else {
+        let nv = str::parse(&args[1]).unwrap();
+        bench_vanilla_plonk(&pcs_srs, nv)?;
     }
-    println!();
 
     Ok(())
 }
@@ -68,58 +63,35 @@ fn write_srs(pcs_srs: &MultilinearUniversalParams<Bls12_381>) {
 
 fn bench_vanilla_plonk(
     pcs_srs: &MultilinearUniversalParams<Bls12_381>,
-    thread: usize,
+    nv: usize
 ) -> Result<(), HyperPlonkErrors> {
-    let filename = format!("vanilla threads {}.txt", thread);
-    let mut file = File::create(filename).unwrap();
-    for nv in MIN_NUM_VARS..=MAX_NUM_VARS {
         let vanilla_gate = CustomizedGates::vanilla_plonk_gate();
-        bench_mock_circuit_zkp_helper(&mut file, nv, &vanilla_gate, pcs_srs)?;
-    }
+        bench_mock_circuit_zkp_helper(nv, &vanilla_gate, pcs_srs)?;
 
     Ok(())
 }
 
 fn bench_jellyfish_plonk(
     pcs_srs: &MultilinearUniversalParams<Bls12_381>,
-    thread: usize,
+    nv: usize,
 ) -> Result<(), HyperPlonkErrors> {
-    let filename = format!("jellyfish threads {}.txt", thread);
-    let mut file = File::create(filename).unwrap();
-    for nv in MIN_NUM_VARS..=MAX_NUM_VARS {
         let jf_gate = CustomizedGates::jellyfish_turbo_plonk_gate();
-        bench_mock_circuit_zkp_helper(&mut file, nv, &jf_gate, pcs_srs)?;
-    }
-
-    Ok(())
-}
-
-fn bench_high_degree_plonk(
-    pcs_srs: &MultilinearUniversalParams<Bls12_381>,
-    degree: usize,
-    thread: usize,
-) -> Result<(), HyperPlonkErrors> {
-    let filename = format!("high degree {} thread {}.txt", degree, thread);
-    let mut file = File::create(filename).unwrap();
-    println!("custom gate of degree {}", degree);
-    let vanilla_gate = CustomizedGates::mock_gate(2, degree);
-    bench_mock_circuit_zkp_helper(&mut file, HIGH_DEGREE_TEST_NV, &vanilla_gate, pcs_srs)?;
+        bench_mock_circuit_zkp_helper( nv, &jf_gate, pcs_srs)?;
 
     Ok(())
 }
 
 fn bench_mock_circuit_zkp_helper(
-    file: &mut File,
     nv: usize,
     gate: &CustomizedGates,
     pcs_srs: &MultilinearUniversalParams<Bls12_381>,
 ) -> Result<(), HyperPlonkErrors> {
-    let repetition = if nv < 10 {
+    let repetition = if nv <= 20 {
+        10
+    } else if nv <= 22 {
         5
-    } else if nv < 20 {
-        2
     } else {
-        1
+        3
     };
 
     //==========================================================
@@ -128,18 +100,6 @@ fn bench_mock_circuit_zkp_helper(
     let index = circuit.index;
     //==========================================================
     // generate pk and vks
-    let start = Instant::now();
-    for _ in 0..repetition {
-        let (_pk, _vk) = <PolyIOP<Fr> as HyperPlonkSNARK<
-            Bls12_381,
-            MultilinearKzgPCS<Bls12_381>,
-        >>::preprocess(&index, pcs_srs)?;
-    }
-    println!(
-        "key extraction for {} variables: {} us",
-        nv,
-        start.elapsed().as_micros() / repetition as u128
-    );
     let (pk, vk) =
         <PolyIOP<Fr> as HyperPlonkSNARK<Bls12_381, MultilinearKzgPCS<Bls12_381>>>::preprocess(
             &index, pcs_srs,
@@ -155,13 +115,11 @@ fn bench_mock_circuit_zkp_helper(
                 &circuit.witnesses,
             )?;
     }
-    let t = start.elapsed().as_micros() / repetition as u128;
     println!(
         "proving for {} variables: {} us",
         nv,
         start.elapsed().as_micros() / repetition as u128
     );
-    file.write_all(format!("{} {}\n", nv, t).as_ref()).unwrap();
 
     let proof = <PolyIOP<Fr> as HyperPlonkSNARK<Bls12_381, MultilinearKzgPCS<Bls12_381>>>::prove(
         &pk,
@@ -171,7 +129,7 @@ fn bench_mock_circuit_zkp_helper(
     //==========================================================
     // verify a proof
     let start = Instant::now();
-    for _ in 0..repetition {
+    for _ in 0..(repetition * 5) {
         let verify =
             <PolyIOP<Fr> as HyperPlonkSNARK<Bls12_381, MultilinearKzgPCS<Bls12_381>>>::verify(
                 &vk,
@@ -183,7 +141,7 @@ fn bench_mock_circuit_zkp_helper(
     println!(
         "verifying for {} variables: {} us",
         nv,
-        start.elapsed().as_micros() / repetition as u128
+        start.elapsed().as_micros() / (repetition * 5) as u128
     );
     Ok(())
 }
