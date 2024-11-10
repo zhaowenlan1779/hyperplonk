@@ -11,6 +11,7 @@ use std::fmt::Debug;
 use crate::poly_iop::{errors::PolyIOPErrors, sum_check::SumCheck, PolyIOP};
 use arithmetic::eq_eval;
 use ark_ff::PrimeField;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{end_timer, start_timer};
 use transcript::IOPTranscript;
 
@@ -33,7 +34,7 @@ pub struct ZeroCheckSubClaim<F: PrimeField> {
 /// It is derived from SumCheck.
 pub trait ZeroCheck<F: PrimeField>: SumCheck<F> {
     type ZeroCheckSubClaim: Clone + Debug + Default + PartialEq;
-    type ZeroCheckProof: Clone + Debug + Default + PartialEq;
+    type ZeroCheckProof: Clone + Debug + Default + PartialEq + CanonicalSerialize + CanonicalDeserialize;
 
     /// Initialize the system with a transcript
     ///

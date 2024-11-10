@@ -14,6 +14,7 @@ use crate::poly_iop::{
 use arithmetic::{VPAuxInfo, VirtualPolynomial};
 use ark_ff::PrimeField;
 use ark_poly::DenseMultilinearExtension;
+use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use ark_std::{end_timer, start_timer};
 use std::{fmt::Debug, sync::Arc};
 use transcript::IOPTranscript;
@@ -27,7 +28,7 @@ pub trait SumCheck<F: PrimeField> {
     type VPAuxInfo;
     type MultilinearExtension;
 
-    type SumCheckProof: Clone + Debug + Default + PartialEq;
+    type SumCheckProof: Clone + Debug + Default + PartialEq + CanonicalSerialize + CanonicalDeserialize;
     type Transcript;
     type SumCheckSubClaim: Clone + Debug + Default + PartialEq;
 

@@ -126,6 +126,15 @@ fn bench_mock_circuit_zkp_helper(
         &circuit.public_inputs,
         &circuit.witnesses,
     )?;
+
+    let mut bytes = Vec::with_capacity(CanonicalSerialize::compressed_size(&proof));
+    CanonicalSerialize::serialize_compressed(&proof, &mut bytes).unwrap();
+    println!("proof size for {} variables compressed: {} bytes", nv, bytes.len());
+
+    let mut bytes = Vec::with_capacity(CanonicalSerialize::uncompressed_size(&proof));
+    CanonicalSerialize::serialize_uncompressed(&proof, &mut bytes).unwrap();
+    println!("proof size for {} variables uncompressed: {} bytes", nv, bytes.len());
+
     //==========================================================
     // verify a proof
     let start = Instant::now();

@@ -25,8 +25,9 @@ use ark_ec::{pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, Curve
 use ark_std::{end_timer, log2, start_timer, One, Zero};
 use std::{collections::BTreeMap, iter, marker::PhantomData, ops::Deref, sync::Arc};
 use transcript::IOPTranscript;
+use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct BatchProof<E, PCS>
 where
     E: Pairing,
@@ -223,7 +224,7 @@ where
         scalars.push(eq_i_a2 * eq_t_list[i]);
         bases.push(f_i_commitments[i].0);
     }
-    let g_prime_commit = E::G1::msm_unchecked(&bases, &scalars);
+    let g_prime_commit = E::G1MSM::msm_unchecked_par_auto(&bases, &scalars);
     end_timer!(step);
 
     // ensure \sum_i eq(t, <i>) * f_i_evals matches the sum via SumCheck
@@ -255,7 +256,7 @@ where
     // verify commitment
     let res = PCS::verify(
         verifier_param,
-        &Commitment(g_prime_commit.into_affine()),
+        &Commitment(g_prime_commit.into()),
         a2.to_vec().as_ref(),
         &tilde_g_eval,
         &proof.g_prime_proof,
