@@ -6,7 +6,7 @@
 
 use std::{fs::File, io, time::Instant};
 
-use ark_bls12_381::{Bls12_381, Fr};
+use ark_bn254::{Bn254, Fr};
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Write};
 use ark_std::test_rng;
 use hyperplonk::{
@@ -32,7 +32,7 @@ fn main() -> Result<(), HyperPlonkErrors> {
             Ok(p) => p,
             Err(_e) => {
                 let srs =
-                    MultilinearKzgPCS::<Bls12_381>::gen_srs_for_testing(&mut rng, SUPPORTED_SIZE)?;
+                    MultilinearKzgPCS::<Bn254>::gen_srs_for_testing(&mut rng, SUPPORTED_SIZE)?;
                 write_srs(&srs);
                 srs
             },
@@ -51,18 +51,18 @@ fn main() -> Result<(), HyperPlonkErrors> {
     Ok(())
 }
 
-fn read_srs() -> Result<MultilinearUniversalParams<Bls12_381>, io::Error> {
+fn read_srs() -> Result<MultilinearUniversalParams<Bn254>, io::Error> {
     let mut f = File::open("srs.params")?;
-    Ok(MultilinearUniversalParams::<Bls12_381>::deserialize_uncompressed_unchecked(&mut f).unwrap())
+    Ok(MultilinearUniversalParams::<Bn254>::deserialize_uncompressed_unchecked(&mut f).unwrap())
 }
 
-fn write_srs(pcs_srs: &MultilinearUniversalParams<Bls12_381>) {
+fn write_srs(pcs_srs: &MultilinearUniversalParams<Bn254>) {
     let mut f = File::create("srs.params").unwrap();
     pcs_srs.serialize_uncompressed(&mut f).unwrap();
 }
 
 fn bench_vanilla_plonk(
-    pcs_srs: &MultilinearUniversalParams<Bls12_381>,
+    pcs_srs: &MultilinearUniversalParams<Bn254>,
     nv: usize
 ) -> Result<(), HyperPlonkErrors> {
         let vanilla_gate = CustomizedGates::vanilla_plonk_gate();
@@ -72,7 +72,7 @@ fn bench_vanilla_plonk(
 }
 
 fn bench_jellyfish_plonk(
-    pcs_srs: &MultilinearUniversalParams<Bls12_381>,
+    pcs_srs: &MultilinearUniversalParams<Bn254>,
     nv: usize,
 ) -> Result<(), HyperPlonkErrors> {
         let jf_gate = CustomizedGates::jellyfish_turbo_plonk_gate();
@@ -84,7 +84,7 @@ fn bench_jellyfish_plonk(
 fn bench_mock_circuit_zkp_helper(
     nv: usize,
     gate: &CustomizedGates,
-    pcs_srs: &MultilinearUniversalParams<Bls12_381>,
+    pcs_srs: &MultilinearUniversalParams<Bn254>,
 ) -> Result<(), HyperPlonkErrors> {
     let repetition = if nv <= 20 {
         10
@@ -101,7 +101,7 @@ fn bench_mock_circuit_zkp_helper(
     //==========================================================
     // generate pk and vks
     let (pk, vk) =
-        <PolyIOP<Fr> as HyperPlonkSNARK<Bls12_381, MultilinearKzgPCS<Bls12_381>>>::preprocess(
+        <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, MultilinearKzgPCS<Bn254>>>::preprocess(
             &index, pcs_srs,
         )?;
     //==========================================================
@@ -109,7 +109,7 @@ fn bench_mock_circuit_zkp_helper(
     let start = Instant::now();
     for _ in 0..repetition {
         let _proof =
-            <PolyIOP<Fr> as HyperPlonkSNARK<Bls12_381, MultilinearKzgPCS<Bls12_381>>>::prove(
+            <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, MultilinearKzgPCS<Bn254>>>::prove(
                 &pk,
                 &circuit.public_inputs,
                 &circuit.witnesses,
@@ -121,7 +121,7 @@ fn bench_mock_circuit_zkp_helper(
         start.elapsed().as_micros() / repetition as u128
     );
 
-    let proof = <PolyIOP<Fr> as HyperPlonkSNARK<Bls12_381, MultilinearKzgPCS<Bls12_381>>>::prove(
+    let proof = <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, MultilinearKzgPCS<Bn254>>>::prove(
         &pk,
         &circuit.public_inputs,
         &circuit.witnesses,
@@ -131,7 +131,7 @@ fn bench_mock_circuit_zkp_helper(
     let start = Instant::now();
     for _ in 0..(repetition * 5) {
         let verify =
-            <PolyIOP<Fr> as HyperPlonkSNARK<Bls12_381, MultilinearKzgPCS<Bls12_381>>>::verify(
+            <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, MultilinearKzgPCS<Bn254>>>::verify(
                 &vk,
                 &circuit.public_inputs,
                 &proof,
