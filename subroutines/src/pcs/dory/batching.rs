@@ -17,29 +17,15 @@ use crate::{
         PolynomialCommitmentScheme,
     },
     poly_iop::{prelude::SumCheck, PolyIOP},
-    IOPProof,
+    BatchProof, IOPProof,
 };
 use arithmetic::{build_eq_x_r_vec, DenseMultilinearExtension, VPAuxInfo, VirtualPolynomial};
-use ark_ec::{pairing::Pairing, scalar_mul::variable_base::VariableBaseMSM, CurveGroup};
+use ark_ec::{pairing::Pairing, pairing::PairingOutput, scalar_mul::variable_base::VariableBaseMSM, CurveGroup};
 
 use ark_std::{end_timer, log2, start_timer, One, Zero};
-use std::{collections::BTreeMap, iter, marker::PhantomData, ops::Deref, sync::Arc};
+use rayon::prelude::*;
+use std::{collections::BTreeMap, iter::zip, marker::PhantomData, ops::Deref, sync::Arc};
 use transcript::IOPTranscript;
-use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
-pub struct BatchProof<E, PCS>
-where
-    E: Pairing,
-    PCS: PolynomialCommitmentScheme<E>,
-{
-    /// A sum check proof proving tilde g's sum
-    pub(crate) sum_check_proof: IOPProof<E::ScalarField>,
-    /// f_i(point_i)
-    pub f_i_eval_at_point_i: Vec<E::ScalarField>,
-    /// proof for g'(a_2)
-    pub(crate) g_prime_proof: PCS::Proof,
-}
 
 /// Steps:
 /// 1. get challenge point t from transcript
@@ -48,10 +34,11 @@ where
 /// 4. compute \tilde eq_i(b) = eq(b, point_i)
 /// 5. run sumcheck on \sum_i=1..k \tilde eq_i * \tilde g_i
 /// 6. build g'(X) = \sum_i=1..k \tilde eq_i(a2) * \tilde g_i(X) where (a2) is
-///    the sumcheck's point 7. open g'(X) at point (a2)
+/// the sumcheck's point 7. open g'(X) at point (a2)
 pub(crate) fn multi_open_internal<E, PCS>(
     prover_param: &PCS::ProverParam,
     polynomials: &[PCS::Polynomial],
+    advices: &[PCS::ProverCommitmentAdvice],
     points: &[PCS::Point],
     evals: &[PCS::Evaluation],
     transcript: &mut IOPTranscript<E::ScalarField>,
@@ -61,9 +48,9 @@ where
     PCS: PolynomialCommitmentScheme<
         E,
         Polynomial = Arc<DenseMultilinearExtension<E::ScalarField>>,
-        ProverCommitmentAdvice = (),
         Point = Vec<E::ScalarField>,
         Evaluation = E::ScalarField,
+        ProverCommitmentAdvice = Vec<E::G1Affine>,
     >,
 {
     let open_timer = start_timer!(|| format!("multi open {} points", points.len()));
@@ -94,21 +81,49 @@ where
         BTreeMap::from_iter(point_indices.iter().map(|(point, idx)| (*idx, *point)))
             .into_values()
             .collect::<Vec<_>>();
-    let merged_tilde_gs = polynomials
-        .iter()
-        .zip(points.iter())
-        .zip(eq_t_i_list.iter())
-        .fold(
-            iter::repeat_with(DenseMultilinearExtension::zero)
-                .map(Arc::new)
-                .take(point_indices.len())
-                .collect::<Vec<_>>(),
-            |mut merged_tilde_gs, ((poly, point), coeff)| {
-                *Arc::make_mut(&mut merged_tilde_gs[point_indices[point]]) +=
-                    (*coeff, poly.deref());
-                merged_tilde_gs
-            },
-        );
+    let mut point_ids = vec![vec![]; point_indices.len()];
+    for (i, point) in points.iter().enumerate() {
+        point_ids[point_indices[point]].push(i);
+    }
+    let (tilde_gs, T_vecs) = rayon::join(
+        || {
+            polynomials
+                .par_iter()
+                .zip(&eq_t_i_list)
+                .map(|(poly, coeff)| {
+                    Arc::new(DenseMultilinearExtension::from_evaluations_vec(
+                        poly.num_vars,
+                        poly.evaluations.iter().map(|eval| *eval * coeff).collect(),
+                    ))
+                })
+                .collect::<Vec<_>>()
+        },
+        || {
+            advices
+                .par_iter()
+                .zip(&eq_t_i_list)
+                .map(|(advice, coeff)| advice.iter().map(|t| *t * coeff).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        },
+    );
+
+    let (mut merged_tilde_gs, mut merged_T_vecs): (Vec<_>, Vec<_>) = point_ids
+        .par_iter()
+        .map(|point_ids| {
+            let mut merged_tilde_g = Arc::new(DenseMultilinearExtension::zero());
+            let mut merged_T_vec = vec![E::G1::zero(); advices[0].len()];
+            for &idx in point_ids {
+                let poly = &tilde_gs[idx];
+                let advice = &T_vecs[idx];
+                *Arc::get_mut(&mut merged_tilde_g).unwrap() += poly.deref();
+
+                for (merged_T, T) in zip(&mut merged_T_vec, advice) {
+                    *merged_T += *T;
+                }
+            }
+            (merged_tilde_g, merged_T_vec)
+        })
+        .unzip();
     end_timer!(timer);
 
     let timer = start_timer!(|| format!("compute tilde eq for {} points", points.len()));
@@ -127,6 +142,7 @@ where
     let timer = start_timer!(|| format!("sum check prove of {} variables", num_var));
 
     let step = start_timer!(|| "add mle");
+    let proof = {
     let mut sum_check_vp = VirtualPolynomial::new(num_var);
     for (merged_tilde_g, tilde_eq) in merged_tilde_gs.iter().zip(tilde_eqs.into_iter()) {
         sum_check_vp.add_mle_list([merged_tilde_g.clone(), tilde_eq], E::ScalarField::one())?;
@@ -145,6 +161,8 @@ where
             ));
         },
     };
+    proof
+};
 
     end_timer!(timer);
 
@@ -154,15 +172,62 @@ where
     // build g'(X) = \sum_i=1..k \tilde eq_i(a2) * \tilde g_i(X) where (a2) is the
     // sumcheck's point \tilde eq_i(a2) = eq(a2, point_i)
     let step = start_timer!(|| "evaluate at a2");
-    let mut g_prime = Arc::new(DenseMultilinearExtension::zero());
-    for (merged_tilde_g, point) in merged_tilde_gs.iter().zip(deduped_points.iter()) {
-        let eq_i_a2 = eq_eval(a2, point)?;
-        *Arc::make_mut(&mut g_prime) += (eq_i_a2, merged_tilde_g.deref());
-    }
+    (&mut merged_tilde_gs, &deduped_points, &mut merged_T_vecs)
+        .into_par_iter()
+        .for_each(|(merged_tilde_g, point, sub_T)| {
+            let eq_i_a2 = eq_eval(&a2, point).unwrap();
+            rayon::join(
+                || {
+                    Arc::get_mut(merged_tilde_g)
+                        .unwrap()
+                        .evaluations
+                        .par_iter_mut()
+                        .for_each(|x| *x *= eq_i_a2)
+                },
+                || sub_T.par_iter_mut().for_each(|x| *x *= eq_i_a2),
+            );
+        });
+    let (g_prime, T_vec) = rayon::join(
+        || {
+            merged_tilde_gs.into_par_iter().reduce(
+                || Arc::new(DenseMultilinearExtension::zero()),
+                |mut a, b| {
+                    if a.is_zero() {
+                        return b;
+                    }
+                    if b.is_zero() {
+                        return a;
+                    }
+                    *Arc::get_mut(&mut a).unwrap() += &*b;
+                    a
+                },
+            )
+        },
+        || {
+            merged_T_vecs.into_par_iter().reduce(
+                || vec![],
+                |mut a, b| {
+                    if a.len() == 0 {
+                        return b;
+                    }
+                    if b.len() == 0 {
+                        return a;
+                    }
+                    a.par_iter_mut().zip(&b).for_each(|(a, b)| *a += b);
+                    a
+                },
+            )
+        },
+    );
+
+    let T_vec = T_vec
+        .into_iter()
+        .map(|x| x.into())
+        .collect::<Vec<E::G1Affine>>();
     end_timer!(step);
 
     let step = start_timer!(|| "pcs open");
-    let g_prime_proof = PCS::open(prover_param, &g_prime, &(), a2.to_vec().as_ref())?;
+    let g_prime_proof = PCS::open(prover_param, &g_prime, &T_vec, a2.to_vec().as_ref())?;
     // assert_eq!(g_prime_eval, tilde_g_eval);
     end_timer!(step);
 
@@ -181,10 +246,10 @@ where
 /// 1. get challenge point t from transcript
 /// 2. build g' commitment
 /// 3. ensure \sum_i eq(a2, point_i) * eq(t, <i>) * f_i_evals matches the sum
-///    via SumCheck verification 4. verify commitment
+/// via SumCheck verification 4. verify commitment
 pub(crate) fn batch_verify_internal<E, PCS>(
     verifier_param: &PCS::VerifierParam,
-    f_i_commitments: &[Commitment<E>],
+    f_i_commitments: &[PairingOutput<E>],
     points: &[PCS::Point],
     proof: &BatchProof<E, PCS>,
     transcript: &mut IOPTranscript<E::ScalarField>,
@@ -196,7 +261,7 @@ where
         Polynomial = Arc<DenseMultilinearExtension<E::ScalarField>>,
         Point = Vec<E::ScalarField>,
         Evaluation = E::ScalarField,
-        Commitment = Commitment<E>,
+        Commitment = PairingOutput<E>,
     >,
 {
     let open_timer = start_timer!(|| "batch verification");
@@ -223,9 +288,9 @@ where
     for (i, point) in points.iter().enumerate() {
         let eq_i_a2 = eq_eval(a2, point)?;
         scalars.push(eq_i_a2 * eq_t_list[i]);
-        bases.push(f_i_commitments[i].0);
+        bases.push(f_i_commitments[i]);
     }
-    let g_prime_commit = E::G1MSM::msm_unchecked_par_auto(&bases, &scalars);
+    let g_prime_commit = PairingOutput::<E>::msm_unchecked(&bases, &scalars);
     end_timer!(step);
 
     // ensure \sum_i eq(t, <i>) * f_i_evals matches the sum via SumCheck
@@ -257,7 +322,7 @@ where
     // verify commitment
     let res = PCS::verify(
         verifier_param,
-        &Commitment(g_prime_commit.into()),
+        &g_prime_commit,
         a2.to_vec().as_ref(),
         &tilde_g_eval,
         &proof.g_prime_proof,
@@ -270,10 +335,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pcs::{
-        prelude::{MultilinearKzgPCS, MultilinearUniversalParams},
-        StructuredReferenceString,
-    };
+    use crate::pcs::dory::Dory;
     use arithmetic::get_batched_nv;
     use ark_bls12_381::Bls12_381 as E;
     use ark_ec::pairing::Pairing;
@@ -283,12 +345,12 @@ mod tests {
     type Fr = <E as Pairing>::ScalarField;
 
     fn test_multi_open_helper<R: Rng>(
-        ml_params: &MultilinearUniversalParams<E>,
+        ml_params: &<Dory<E> as PolynomialCommitmentScheme<E>>::SRS,
         polys: &[Arc<DenseMultilinearExtension<Fr>>],
         rng: &mut R,
     ) -> Result<(), PCSError> {
         let merged_nv = get_batched_nv(polys[0].num_vars(), polys.len());
-        let (ml_ck, ml_vk) = ml_params.trim(merged_nv)?;
+        let (ml_ck, ml_vk) = Dory::<E>::trim(ml_params, None, Some(merged_nv))?;
 
         let mut points = Vec::new();
         for poly in polys.iter() {
@@ -304,17 +366,18 @@ mod tests {
             .map(|(f, p)| f.evaluate(p).unwrap())
             .collect::<Vec<_>>();
 
-        let commitments = polys
+        let (commitments, advices) : (Vec<_>, Vec<_>) = polys
             .iter()
-            .map(|poly| MultilinearKzgPCS::commit(ml_ck.clone(), poly).unwrap().0)
-            .collect::<Vec<_>>();
+            .map(|poly| Dory::commit(&ml_ck.clone(), poly).unwrap())
+            .unzip();
 
         let mut transcript = IOPTranscript::new("test transcript".as_ref());
         transcript.append_field_element("init".as_ref(), &Fr::zero())?;
 
-        let batch_proof = multi_open_internal::<E, MultilinearKzgPCS<E>>(
+        let batch_proof = multi_open_internal::<E, Dory<E>>(
             &ml_ck,
-            polys,
+            &polys,
+            &advices,
             &points,
             &evals,
             &mut transcript,
@@ -323,7 +386,7 @@ mod tests {
         // good path
         let mut transcript = IOPTranscript::new("test transcript".as_ref());
         transcript.append_field_element("init".as_ref(), &Fr::zero())?;
-        assert!(batch_verify_internal::<E, MultilinearKzgPCS<E>>(
+        assert!(batch_verify_internal::<E, Dory<E>>(
             &ml_vk,
             &commitments,
             &points,
@@ -338,7 +401,7 @@ mod tests {
     fn test_multi_open_internal() -> Result<(), PCSError> {
         let mut rng = test_rng();
 
-        let ml_params = MultilinearUniversalParams::<E>::gen_srs_for_testing(&mut rng, 20)?;
+        let ml_params = Dory::<E>::gen_srs_for_testing(&mut rng, 10)?;
         for num_poly in 5..6 {
             for nv in 15..16 {
                 let polys1: Vec<_> = (0..num_poly)

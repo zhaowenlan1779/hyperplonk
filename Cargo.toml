@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
   "arithmetic",
+  "deDory",
   "hyperplonk",
   "subroutines",
   "transcript",

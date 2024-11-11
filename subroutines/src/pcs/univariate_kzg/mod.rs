@@ -50,6 +50,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for UnivariateKzgPCS<E> {
     type Evaluation = E::ScalarField;
     // Polynomial and its associated types
     type Commitment = Commitment<E>;
+    type ProverCommitmentAdvice = ();
     type Proof = UnivariateKzgProof<E>;
 
     // We do not implement batch univariate KZG at the current version.
@@ -90,7 +91,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for UnivariateKzgPCS<E> {
     fn commit(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Self::Polynomial,
-    ) -> Result<Self::Commitment, PCSError> {
+    ) -> Result<(Self::Commitment, Self::ProverCommitmentAdvice), PCSError> {
         let prover_param = prover_param.borrow();
         let commit_time =
             start_timer!(|| format!("Committing to polynomial of degree {} ", poly.degree()));
@@ -112,7 +113,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for UnivariateKzgPCS<E> {
         end_timer!(msm_time);
 
         end_timer!(commit_time);
-        Ok(Commitment(commitment))
+        Ok((Commitment(commitment), ()))
     }
 
     /// On input a polynomial `p` and a point `point`, outputs a proof for the
@@ -120,8 +121,9 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for UnivariateKzgPCS<E> {
     fn open(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Self::Polynomial,
+        _prover_advice: &Self::ProverCommitmentAdvice,
         point: &Self::Point,
-    ) -> Result<(Self::Proof, Self::Evaluation), PCSError> {
+    ) -> Result<Self::Proof, PCSError> {
         let open_time =
             start_timer!(|| format!("Opening polynomial of degree {}", polynomial.degree()));
         let divisor = Self::Polynomial::from_coefficients_vec(vec![-*point, E::ScalarField::one()]);
@@ -138,10 +140,8 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for UnivariateKzgPCS<E> {
         )
         .into_affine();
 
-        let eval = polynomial.evaluate(point);
-
         end_timer!(open_time);
-        Ok((Self::Proof { proof }, eval))
+        Ok(Self::Proof { proof })
     }
 
     /// Verifies that `value` is the evaluation at `x` of the polynomial
@@ -206,9 +206,10 @@ mod tests {
             let p = <DensePolynomial<E::ScalarField> as DenseUVPolynomial<E::ScalarField>>::rand(
                 degree, rng,
             );
-            let comm = UnivariateKzgPCS::<E>::commit(&ck, &p)?;
+            let (comm, _) = UnivariateKzgPCS::<E>::commit(&ck, &p)?;
             let point = E::ScalarField::rand(rng);
-            let (proof, value) = UnivariateKzgPCS::<E>::open(&ck, &p, &point)?;
+            let proof = UnivariateKzgPCS::<E>::open(&ck, &p, &(), &point)?;
+            let value = p.evaluate(&point);
             assert!(
                 UnivariateKzgPCS::<E>::verify(&vk, &comm, &point, &value, &proof)?,
                 "proof was incorrect for max_degree = {}, polynomial_degree = {}",
@@ -232,9 +233,10 @@ mod tests {
             let p = <DensePolynomial<E::ScalarField> as DenseUVPolynomial<E::ScalarField>>::rand(
                 degree, rng,
             );
-            let comm = UnivariateKzgPCS::<E>::commit(&ck, &p)?;
+            let (comm, _) = UnivariateKzgPCS::<E>::commit(&ck, &p)?;
             let point = E::ScalarField::rand(rng);
-            let (proof, value) = UnivariateKzgPCS::<E>::open(&ck, &p, &point)?;
+            let proof = UnivariateKzgPCS::<E>::open(&ck, &p, &(), &point)?;
+            let value = p.evaluate(&point);
             assert!(
                 UnivariateKzgPCS::<E>::verify(&vk, &comm, &point, &value, &proof)?,
                 "proof was incorrect for max_degree = {}, polynomial_degree = {}",

@@ -138,8 +138,10 @@ pub struct HyperPlonkProvingKey<E: Pairing, PCS: PolynomialCommitmentScheme<E>> 
     pub selector_oracles: Vec<Arc<DenseMultilinearExtension<E::ScalarField>>>,
     /// Commitments to the preprocessed selector polynomials
     pub selector_commitments: Vec<PCS::Commitment>,
+    pub selector_advices: Vec<PCS::ProverCommitmentAdvice>,
     /// Commitments to the preprocessed permutation polynomials
     pub permutation_commitments: Vec<PCS::Commitment>,
+    pub permutation_advices: Vec<PCS::ProverCommitmentAdvice>,
     /// The parameters for PCS commitment
     pub pcs_param: PCS::ProverParam,
 }

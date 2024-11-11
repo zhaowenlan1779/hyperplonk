@@ -95,6 +95,8 @@ where
     ) -> Result<
         (
             Self::ProductCheckProof,
+            PCS::ProverCommitmentAdvice,
+            PCS::ProverCommitmentAdvice,
             Self::MultilinearExtension,
             Self::MultilinearExtension,
         ),
@@ -166,6 +168,8 @@ where
     ) -> Result<
         (
             Self::ProductCheckProof,
+            PCS::ProverCommitmentAdvice,
+            PCS::ProverCommitmentAdvice,
             Self::MultilinearExtension,
             Self::MultilinearExtension,
         ),
@@ -196,8 +200,8 @@ where
         let prod_x = compute_product_poly(&frac_poly)?;
 
         // generate challenge
-        let frac_comm = PCS::commit(pcs_param, &frac_poly)?;
-        let prod_x_comm = PCS::commit(pcs_param, &prod_x)?;
+        let (frac_comm, frac_advice) = PCS::commit(pcs_param, &frac_poly)?;
+        let (prod_x_comm, prod_x_advice) = PCS::commit(pcs_param, &prod_x)?;
         transcript.append_serializable_element(b"frac(x)", &frac_comm)?;
         transcript.append_serializable_element(b"prod(x)", &prod_x_comm)?;
         let alpha = transcript.get_and_append_challenge(b"alpha")?;
@@ -214,6 +218,8 @@ where
                 prod_x_comm,
                 frac_comm,
             },
+            prod_x_advice,
+            frac_advice,
             prod_x,
             frac_poly,
         ))
@@ -310,7 +316,7 @@ mod test {
         let mut transcript = <PolyIOP<E::ScalarField> as ProductCheck<E, PCS>>::init_transcript();
         transcript.append_message(b"testing", b"initializing transcript for testing")?;
 
-        let (proof, prod_x, frac_poly) = <PolyIOP<E::ScalarField> as ProductCheck<E, PCS>>::prove(
+        let (proof, _, _, prod_x, frac_poly) = <PolyIOP<E::ScalarField> as ProductCheck<E, PCS>>::prove(
             pcs_param,
             fs,
             gs,
@@ -342,7 +348,7 @@ mod test {
         let mut transcript = <PolyIOP<E::ScalarField> as ProductCheck<E, PCS>>::init_transcript();
         transcript.append_message(b"testing", b"initializing transcript for testing")?;
 
-        let (bad_proof, prod_x_bad, frac_poly) = <PolyIOP<E::ScalarField> as ProductCheck<
+        let (bad_proof, _, _, prod_x_bad, frac_poly) = <PolyIOP<E::ScalarField> as ProductCheck<
             E,
             PCS,
         >>::prove(

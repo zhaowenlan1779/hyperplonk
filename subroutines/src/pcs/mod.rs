@@ -8,6 +8,7 @@ mod errors;
 mod multilinear_kzg;
 mod structs;
 mod univariate_kzg;
+pub mod dory;
 
 pub mod prelude;
 
@@ -35,7 +36,16 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
     /// Polynomial Evaluation
     type Evaluation: Field;
     /// Commitments
-    type Commitment: Clone + CanonicalSerialize + CanonicalDeserialize + Debug + PartialEq + Eq;
+    type Commitment: Clone
+    + CanonicalSerialize
+    + CanonicalDeserialize
+    + Debug
+    + PartialEq
+    + Eq
+    + Send
+    + Default
+    + Copy;
+    type ProverCommitmentAdvice: Clone + Send + Sync + Default + Debug;
     /// Proofs
     type Proof: Clone + CanonicalSerialize + CanonicalDeserialize + Debug + PartialEq + Eq;
     /// Batch proofs
@@ -82,21 +92,23 @@ pub trait PolynomialCommitmentScheme<E: Pairing> {
     fn commit(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Self::Polynomial,
-    ) -> Result<Self::Commitment, PCSError>;
+    ) -> Result<(Self::Commitment, Self::ProverCommitmentAdvice), PCSError>;
 
     /// On input a polynomial `p` and a point `point`, outputs a proof for the
     /// same.
     fn open(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Self::Polynomial,
+        prover_advice: &Self::ProverCommitmentAdvice,
         point: &Self::Point,
-    ) -> Result<(Self::Proof, Self::Evaluation), PCSError>;
+    ) -> Result<Self::Proof, PCSError>;
 
     /// Input a list of multilinear extensions, and a same number of points, and
     /// a transcript, compute a multi-opening for all the polynomials.
     fn multi_open(
         _prover_param: impl Borrow<Self::ProverParam>,
         _polynomials: &[Self::Polynomial],
+        _advices: &[Self::ProverCommitmentAdvice],
         _points: &[Self::Point],
         _evals: &[Self::Evaluation],
         _transcript: &mut IOPTranscript<E::ScalarField>,

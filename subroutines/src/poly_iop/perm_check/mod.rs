@@ -85,6 +85,8 @@ where
     ) -> Result<
         (
             Self::PermutationProof,
+            PCS::ProverCommitmentAdvice,
+            PCS::ProverCommitmentAdvice,
             Self::MultilinearExtension,
             Self::MultilinearExtension,
         ),
@@ -121,6 +123,8 @@ where
     ) -> Result<
         (
             Self::PermutationProof,
+            PCS::ProverCommitmentAdvice,
+            PCS::ProverCommitmentAdvice,
             Self::MultilinearExtension,
             Self::MultilinearExtension,
         ),
@@ -155,7 +159,7 @@ where
         let (numerators, denominators) = computer_nums_and_denoms(&beta, &gamma, fxs, gxs, perms)?;
 
         // invoke product check on numerator and denominator
-        let (proof, prod_poly, frac_poly) = <Self as ProductCheck<E, PCS>>::prove(
+        let (proof, prod_advice, frac_advice, prod_poly, frac_poly) = <Self as ProductCheck<E, PCS>>::prove(
             pcs_param,
             &numerators,
             &denominators,
@@ -163,7 +167,7 @@ where
         )?;
 
         end_timer!(start);
-        Ok((proof, prod_poly, frac_poly))
+        Ok((proof, prod_advice, frac_advice, prod_poly, frac_poly))
     }
 
     fn verify(
@@ -229,7 +233,7 @@ mod test {
         let mut transcript =
             <PolyIOP<E::ScalarField> as PermutationCheck<E, PCS>>::init_transcript();
         transcript.append_message(b"testing", b"initializing transcript for testing")?;
-        let (proof, prod_x, _frac_poly) =
+        let (proof, _, _, prod_x, _frac_poly) =
             <PolyIOP<E::ScalarField> as PermutationCheck<E, PCS>>::prove(
                 pcs_param,
                 fxs,

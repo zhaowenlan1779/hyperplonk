@@ -40,7 +40,6 @@ where
         Polynomial = Arc<DenseMultilinearExtension<E::ScalarField>>,
         Point = Vec<E::ScalarField>,
         Evaluation = E::ScalarField,
-        Commitment = Commitment<E>,
         BatchProof = BatchProof<E, PCS>,
     >,
 {
@@ -63,15 +62,17 @@ where
         // build permutation oracles
         let mut permutation_oracles = vec![];
         let mut perm_comms = vec![];
+        let mut perm_advices = vec![];
         let chunk_size = 1 << num_vars;
         for i in 0..index.num_witness_columns() {
             let perm_oracle = Arc::new(DenseMultilinearExtension::from_evaluations_slice(
                 num_vars,
                 &index.permutation[i * chunk_size..(i + 1) * chunk_size],
             ));
-            let perm_comm = PCS::commit(&pcs_prover_param, &perm_oracle)?;
+            let (perm_comm, perm_advice) = PCS::commit(&pcs_prover_param, &perm_oracle)?;
             permutation_oracles.push(perm_oracle);
             perm_comms.push(perm_comm);
+            perm_advices.push(perm_advice);
         }
 
         // build selector oracles and commit to it
@@ -81,10 +82,10 @@ where
             .map(|s| Arc::new(DenseMultilinearExtension::from(s)))
             .collect();
 
-        let selector_commitments = selector_oracles
+        let (selector_commitments, selector_advices) : (Vec<_>, Vec<_>)= selector_oracles
             .par_iter()
-            .map(|poly| PCS::commit(&pcs_prover_param, poly))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|poly| PCS::commit(&pcs_prover_param, poly).unwrap())
+            .unzip();
 
         Ok((
             Self::ProvingKey {
@@ -92,7 +93,9 @@ where
                 permutation_oracles,
                 selector_oracles,
                 selector_commitments: selector_commitments.clone(),
+                selector_advices,
                 permutation_commitments: perm_comms.clone(),
+                permutation_advices: perm_advices,
                 pcs_param: pcs_prover_param,
             },
             Self::VerifyingKey {
@@ -183,10 +186,10 @@ where
             .map(|w| Arc::new(DenseMultilinearExtension::from(w)))
             .collect();
 
-        let witness_commits = witness_polys
+        let (witness_commits, witness_advices) : (Vec<_>, Vec<_>) = witness_polys
             .par_iter()
             .map(|x| PCS::commit(&pk.pcs_param, x).unwrap())
-            .collect::<Vec<_>>();
+            .unzip();
         for w_com in witness_commits.iter() {
             transcript.append_serializable_element(b"w", w_com)?;
         }
@@ -221,7 +224,7 @@ where
         // =======================================================================
         let step = start_timer!(|| "Permutation check on w_i(x)");
 
-        let (perm_check_proof, prod_x, frac_poly) = <Self as PermutationCheck<E, PCS>>::prove(
+        let (perm_check_proof, prod_x_advice, frac_poly_advice, prod_x, frac_poly) = <Self as PermutationCheck<E, PCS>>::prove(
             &pk.pcs_param,
             &witness_polys,
             &witness_polys,
@@ -276,52 +279,59 @@ where
         .concat();
 
         // prod(x)'s points
-        pcs_acc.insert_poly_and_points(&prod_x, &perm_check_proof.prod_x_comm, perm_check_point);
-        pcs_acc.insert_poly_and_points(&prod_x, &perm_check_proof.prod_x_comm, &perm_check_point_0);
-        pcs_acc.insert_poly_and_points(&prod_x, &perm_check_proof.prod_x_comm, &perm_check_point_1);
+        pcs_acc.insert_poly_and_points(&prod_x, &perm_check_proof.prod_x_comm, &prod_x_advice, perm_check_point);
+        pcs_acc.insert_poly_and_points(&prod_x, &perm_check_proof.prod_x_comm, &prod_x_advice, &perm_check_point_0);
+        pcs_acc.insert_poly_and_points(&prod_x, &perm_check_proof.prod_x_comm, &prod_x_advice, &perm_check_point_1);
         pcs_acc.insert_poly_and_points(
             &prod_x,
             &perm_check_proof.prod_x_comm,
+            &prod_x_advice,
             &prod_final_query_point,
         );
 
         // frac(x)'s points
-        pcs_acc.insert_poly_and_points(&frac_poly, &perm_check_proof.frac_comm, perm_check_point);
+        pcs_acc.insert_poly_and_points(&frac_poly, &perm_check_proof.frac_comm, &frac_poly_advice, perm_check_point);
         pcs_acc.insert_poly_and_points(
             &frac_poly,
             &perm_check_proof.frac_comm,
+            &frac_poly_advice,
             &perm_check_point_0,
         );
         pcs_acc.insert_poly_and_points(
             &frac_poly,
             &perm_check_proof.frac_comm,
+            &frac_poly_advice,
             &perm_check_point_1,
         );
 
         // perms(x)'s points
-        for (perm, pcom) in pk
+        for ((perm, pcom), padvice) in pk
             .permutation_oracles
             .iter()
             .zip(pk.permutation_commitments.iter())
+            .zip(pk.permutation_advices.iter())
         {
-            pcs_acc.insert_poly_and_points(perm, pcom, perm_check_point);
+            pcs_acc.insert_poly_and_points(perm, pcom, padvice, perm_check_point);
         }
 
         // witnesses' points
         // TODO: refactor so it remains correct even if the order changed
-        for (wpoly, wcom) in witness_polys.iter().zip(witness_commits.iter()) {
-            pcs_acc.insert_poly_and_points(wpoly, wcom, perm_check_point);
+        for ((wpoly, wcom), wadvice) in witness_polys.iter().zip(witness_commits.iter())
+            .zip(witness_advices.iter()) {
+            pcs_acc.insert_poly_and_points(wpoly, wcom, wadvice, perm_check_point);
         }
-        for (wpoly, wcom) in witness_polys.iter().zip(witness_commits.iter()) {
-            pcs_acc.insert_poly_and_points(wpoly, wcom, &zero_check_proof.point);
+        for ((wpoly, wcom), wadvice) in witness_polys.iter().zip(witness_commits.iter())
+        .zip(witness_advices.iter()) {
+            pcs_acc.insert_poly_and_points(wpoly, wcom, wadvice, &zero_check_proof.point);
         }
 
         //   - 4.3.2. (deferred) selector_poly(zero_check_point)
         pk.selector_oracles
             .iter()
             .zip(pk.selector_commitments.iter())
-            .for_each(|(poly, com)| {
-                pcs_acc.insert_poly_and_points(poly, com, &zero_check_proof.point)
+            .zip(pk.selector_advices.iter())
+            .for_each(|((poly, com), advice)| {
+                pcs_acc.insert_poly_and_points(poly, com, advice, &zero_check_proof.point)
             });
 
         // - 4.4. public input consistency checks
@@ -331,7 +341,7 @@ where
         let r_pi_padded = [r_pi, vec![E::ScalarField::zero(); num_vars - ell]].concat();
         // Evaluate witness_poly[0] at r_pi||0s which is equal to public_input evaluated
         // at r_pi. Assumes that public_input is a power of 2
-        pcs_acc.insert_poly_and_points(&witness_polys[0], &witness_commits[0], &r_pi_padded);
+        pcs_acc.insert_poly_and_points(&witness_polys[0], &witness_commits[0], &witness_advices[0], &r_pi_padded);
         end_timer!(step);
 
         // =======================================================================

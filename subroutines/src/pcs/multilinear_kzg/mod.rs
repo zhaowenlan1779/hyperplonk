@@ -58,6 +58,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for MultilinearKzgPCS<E> {
     type Evaluation = E::ScalarField;
     // Commitments and proofs
     type Commitment = Commitment<E>;
+    type ProverCommitmentAdvice = ();
     type Proof = MultilinearKzgProof<E>;
     type BatchProof = BatchProof<E, Self>;
 
@@ -102,7 +103,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for MultilinearKzgPCS<E> {
     fn commit(
         prover_param: impl Borrow<Self::ProverParam>,
         poly: &Self::Polynomial,
-    ) -> Result<Self::Commitment, PCSError> {
+    ) -> Result<(Self::Commitment, Self::ProverCommitmentAdvice), PCSError> {
         let prover_param = prover_param.borrow();
         let commit_timer = start_timer!(|| "commit");
         if prover_param.num_vars < poly.num_vars {
@@ -123,7 +124,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for MultilinearKzgPCS<E> {
         end_timer!(msm_timer);
 
         end_timer!(commit_timer);
-        Ok(Commitment(commitment))
+        Ok((Commitment(commitment), ()))
     }
 
     /// On input a polynomial `p` and a point `point`, outputs a proof for the
@@ -138,8 +139,9 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for MultilinearKzgPCS<E> {
     fn open(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomial: &Self::Polynomial,
+        _prover_advice: &Self::ProverCommitmentAdvice,
         point: &Self::Point,
-    ) -> Result<(Self::Proof, Self::Evaluation), PCSError> {
+    ) -> Result<Self::Proof, PCSError> {
         open_internal(prover_param.borrow(), polynomial, point)
     }
 
@@ -148,6 +150,7 @@ impl<E: Pairing> PolynomialCommitmentScheme<E> for MultilinearKzgPCS<E> {
     fn multi_open(
         prover_param: impl Borrow<Self::ProverParam>,
         polynomials: &[Self::Polynomial],
+        _advices: &[Self::ProverCommitmentAdvice],
         points: &[Self::Point],
         evals: &[Self::Evaluation],
         transcript: &mut IOPTranscript<E::ScalarField>,
@@ -202,7 +205,7 @@ fn open_internal<E: Pairing>(
     prover_param: &MultilinearProverParam<E>,
     polynomial: &DenseMultilinearExtension<E::ScalarField>,
     point: &[E::ScalarField],
-) -> Result<(MultilinearKzgProof<E>, E::ScalarField), PCSError> {
+) -> Result<MultilinearKzgProof<E>, PCSError> {
     let open_timer = start_timer!(|| format!("open mle with {} variable", polynomial.num_vars));
 
     if polynomial.num_vars() > prover_param.num_vars {
@@ -258,9 +261,8 @@ fn open_internal<E: Pairing>(
 
         end_timer!(ith_round);
     }
-    let eval = evaluate_opt(polynomial, point);
     end_timer!(open_timer);
-    Ok((MultilinearKzgProof { proofs }, eval))
+    Ok(MultilinearKzgProof { proofs })
 }
 
 /// Verifies that `value` is the evaluation at `x` of the polynomial
@@ -348,8 +350,9 @@ mod tests {
         assert_ne!(nv, 0);
         let (ck, vk) = MultilinearKzgPCS::trim(params, None, Some(nv))?;
         let point: Vec<_> = (0..nv).map(|_| Fr::rand(rng)).collect();
-        let com = MultilinearKzgPCS::commit(&ck, poly)?;
-        let (proof, value) = MultilinearKzgPCS::open(&ck, poly, &point)?;
+        let (com, _) = MultilinearKzgPCS::commit(&ck, poly)?;
+        let proof = MultilinearKzgPCS::open(&ck, poly, &(), &point)?;
+        let value = poly.evaluate(&point).unwrap();
 
         assert!(MultilinearKzgPCS::verify(
             &vk, &com, &point, &value, &proof

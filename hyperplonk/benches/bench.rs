@@ -15,13 +15,14 @@ use hyperplonk::{
 };
 use subroutines::{
     pcs::{
-        prelude::{MultilinearKzgPCS, MultilinearUniversalParams},
+        dory::Dory,
         PolynomialCommitmentScheme,
     },
     poly_iop::PolyIOP,
 };
+use deDory::PublicParameters;
 
-const SUPPORTED_SIZE: usize = 26;
+const SUPPORTED_SIZE: usize = 13;
 
 fn main() -> Result<(), HyperPlonkErrors> {
     let thread = rayon::current_num_threads();
@@ -32,7 +33,7 @@ fn main() -> Result<(), HyperPlonkErrors> {
             Ok(p) => p,
             Err(_e) => {
                 let srs =
-                    MultilinearKzgPCS::<Bn254>::gen_srs_for_testing(&mut rng, SUPPORTED_SIZE)?;
+                    Dory::<Bn254>::gen_srs_for_testing(&mut rng, SUPPORTED_SIZE)?;
                 write_srs(&srs);
                 srs
             },
@@ -51,28 +52,28 @@ fn main() -> Result<(), HyperPlonkErrors> {
     Ok(())
 }
 
-fn read_srs() -> Result<MultilinearUniversalParams<Bn254>, io::Error> {
+fn read_srs() -> Result<PublicParameters<Bn254>, io::Error> {
     let mut f = File::open("srs.params")?;
-    Ok(MultilinearUniversalParams::<Bn254>::deserialize_uncompressed_unchecked(&mut f).unwrap())
+    Ok(PublicParameters::<Bn254>::deserialize_uncompressed_unchecked(&mut f).unwrap())
 }
 
-fn write_srs(pcs_srs: &MultilinearUniversalParams<Bn254>) {
+fn write_srs(pcs_srs: &PublicParameters<Bn254>) {
     let mut f = File::create("srs.params").unwrap();
     pcs_srs.serialize_uncompressed(&mut f).unwrap();
 }
 
 fn bench_vanilla_plonk(
-    pcs_srs: &MultilinearUniversalParams<Bn254>,
+    pcs_srs: &PublicParameters<Bn254>,
     nv: usize
 ) -> Result<(), HyperPlonkErrors> {
-        let vanilla_gate = CustomizedGates::vanilla_plonk_gate();
-        bench_mock_circuit_zkp_helper(nv, &vanilla_gate, pcs_srs)?;
+    let vanilla_gate = CustomizedGates::vanilla_plonk_gate();
+    bench_mock_circuit_zkp_helper(nv, &vanilla_gate, pcs_srs)?;
 
     Ok(())
 }
 
 fn bench_jellyfish_plonk(
-    pcs_srs: &MultilinearUniversalParams<Bn254>,
+    pcs_srs: &PublicParameters<Bn254>,
     nv: usize,
 ) -> Result<(), HyperPlonkErrors> {
         let jf_gate = CustomizedGates::jellyfish_turbo_plonk_gate();
@@ -84,7 +85,7 @@ fn bench_jellyfish_plonk(
 fn bench_mock_circuit_zkp_helper(
     nv: usize,
     gate: &CustomizedGates,
-    pcs_srs: &MultilinearUniversalParams<Bn254>,
+    pcs_srs: &PublicParameters<Bn254>,
 ) -> Result<(), HyperPlonkErrors> {
     let repetition = if nv <= 20 {
         10
@@ -101,7 +102,7 @@ fn bench_mock_circuit_zkp_helper(
     //==========================================================
     // generate pk and vks
     let (pk, vk) =
-        <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, MultilinearKzgPCS<Bn254>>>::preprocess(
+        <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, Dory<Bn254>>>::preprocess(
             &index, pcs_srs,
         )?;
     //==========================================================
@@ -109,7 +110,7 @@ fn bench_mock_circuit_zkp_helper(
     let start = Instant::now();
     for _ in 0..repetition {
         let _proof =
-            <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, MultilinearKzgPCS<Bn254>>>::prove(
+            <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, Dory<Bn254>>>::prove(
                 &pk,
                 &circuit.public_inputs,
                 &circuit.witnesses,
@@ -121,7 +122,7 @@ fn bench_mock_circuit_zkp_helper(
         start.elapsed().as_micros() / repetition as u128
     );
 
-    let proof = <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, MultilinearKzgPCS<Bn254>>>::prove(
+    let proof = <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, Dory<Bn254>>>::prove(
         &pk,
         &circuit.public_inputs,
         &circuit.witnesses,
@@ -140,7 +141,7 @@ fn bench_mock_circuit_zkp_helper(
     let start = Instant::now();
     for _ in 0..(repetition * 5) {
         let verify =
-            <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, MultilinearKzgPCS<Bn254>>>::verify(
+            <PolyIOP<Fr> as HyperPlonkSNARK<Bn254, Dory<Bn254>>>::verify(
                 &vk,
                 &circuit.public_inputs,
                 &proof,

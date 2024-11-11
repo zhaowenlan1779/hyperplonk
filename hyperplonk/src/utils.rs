@@ -29,6 +29,7 @@ pub(super) struct PcsAccumulator<E: Pairing, PCS: PolynomialCommitmentScheme<E>>
     pub(crate) num_var: usize,
     pub(crate) polynomials: Vec<PCS::Polynomial>,
     pub(crate) commitments: Vec<PCS::Commitment>,
+    pub(crate) advices: Vec<PCS::ProverCommitmentAdvice>,
     pub(crate) points: Vec<PCS::Point>,
     pub(crate) evals: Vec<PCS::Evaluation>,
 }
@@ -41,7 +42,6 @@ where
         Polynomial = Arc<DenseMultilinearExtension<E::ScalarField>>,
         Point = Vec<E::ScalarField>,
         Evaluation = E::ScalarField,
-        Commitment = Commitment<E>,
     >,
 {
     /// Create an empty accumulator.
@@ -50,6 +50,7 @@ where
             num_var,
             polynomials: vec![],
             commitments: vec![],
+            advices: vec![],
             points: vec![],
             evals: vec![],
         }
@@ -60,6 +61,7 @@ where
         &mut self,
         poly: &PCS::Polynomial,
         commit: &PCS::Commitment,
+        advice: &PCS::ProverCommitmentAdvice,
         point: &PCS::Point,
     ) {
         assert!(poly.num_vars == point.len());
@@ -69,8 +71,9 @@ where
 
         self.evals.push(eval);
         self.polynomials.push(poly.clone());
+        self.advices.push(advice.clone());
         self.points.push(point.clone());
-        self.commitments.push(*commit);
+        self.commitments.push(commit.clone());
     }
 
     /// Batch open all the points over a merged polynomial.
@@ -83,6 +86,7 @@ where
         Ok(PCS::multi_open(
             prover_param.borrow(),
             self.polynomials.as_ref(),
+            self.advices.as_ref(),
             self.points.as_ref(),
             self.evals.as_ref(),
             transcript,
