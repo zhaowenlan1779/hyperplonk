@@ -26,6 +26,7 @@ use ark_std::{end_timer, log2, start_timer, One, Zero};
 use std::{collections::BTreeMap, iter, marker::PhantomData, ops::Deref, sync::Arc};
 use transcript::IOPTranscript;
 use ark_serialize::{CanonicalSerialize, CanonicalDeserialize};
+use rayon::prelude::*;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, CanonicalSerialize, CanonicalDeserialize)]
 pub struct BatchProof<E, PCS>
@@ -94,21 +95,34 @@ where
         BTreeMap::from_iter(point_indices.iter().map(|(point, idx)| (*idx, *point)))
             .into_values()
             .collect::<Vec<_>>();
-    let merged_tilde_gs = polynomials
-        .iter()
-        .zip(points.iter())
-        .zip(eq_t_i_list.iter())
-        .fold(
-            iter::repeat_with(DenseMultilinearExtension::zero)
-                .map(Arc::new)
-                .take(point_indices.len())
-                .collect::<Vec<_>>(),
-            |mut merged_tilde_gs, ((poly, point), coeff)| {
-                *Arc::make_mut(&mut merged_tilde_gs[point_indices[point]]) +=
-                    (*coeff, poly.deref());
-                merged_tilde_gs
-            },
-        );
+
+    let mut point_ids = vec![vec![]; point_indices.len()];
+    for (i, point) in points.iter().enumerate() {
+        point_ids[point_indices[point]].push(i);
+    }
+
+    let tilde_gs = polynomials
+        .par_iter()
+        .zip(&eq_t_i_list)
+        .map(|(poly, coeff)| {
+            Arc::new(DenseMultilinearExtension::from_evaluations_vec(
+                poly.num_vars,
+                poly.evaluations.iter().map(|eval| *eval * coeff).collect(),
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    let mut merged_tilde_gs = point_ids
+        .par_iter()
+        .map(|point_ids| {
+            let mut merged_tilde_g = Arc::new(DenseMultilinearExtension::zero());
+            for &idx in point_ids {
+                let poly = &tilde_gs[idx];
+                *Arc::get_mut(&mut merged_tilde_g).unwrap() += poly.deref();
+            }
+            merged_tilde_g
+        })
+        .collect::<Vec<_>>();
     end_timer!(timer);
 
     let timer = start_timer!(|| format!("compute tilde eq for {} points", points.len()));
@@ -126,6 +140,7 @@ where
     // built the virtual polynomial for SumCheck
     let timer = start_timer!(|| format!("sum check prove of {} variables", num_var));
 
+    let proof = {
     let step = start_timer!(|| "add mle");
     let mut sum_check_vp = VirtualPolynomial::new(num_var);
     for (merged_tilde_g, tilde_eq) in merged_tilde_gs.iter().zip(tilde_eqs.into_iter()) {
@@ -145,6 +160,8 @@ where
             ));
         },
     };
+    proof
+};
 
     end_timer!(timer);
 
@@ -154,11 +171,29 @@ where
     // build g'(X) = \sum_i=1..k \tilde eq_i(a2) * \tilde g_i(X) where (a2) is the
     // sumcheck's point \tilde eq_i(a2) = eq(a2, point_i)
     let step = start_timer!(|| "evaluate at a2");
-    let mut g_prime = Arc::new(DenseMultilinearExtension::zero());
-    for (merged_tilde_g, point) in merged_tilde_gs.iter().zip(deduped_points.iter()) {
-        let eq_i_a2 = eq_eval(a2, point)?;
-        *Arc::make_mut(&mut g_prime) += (eq_i_a2, merged_tilde_g.deref());
-    }
+    (&mut merged_tilde_gs, &deduped_points)
+        .into_par_iter()
+        .for_each(|(merged_tilde_g, point)| {
+            let eq_i_a2 = eq_eval(&a2, point).unwrap();
+            Arc::get_mut(merged_tilde_g)
+                .unwrap()
+                .evaluations
+                .par_iter_mut()
+                .for_each(|x| *x *= eq_i_a2)
+        });
+    let g_prime = merged_tilde_gs.into_par_iter().reduce(
+        || Arc::new(DenseMultilinearExtension::zero()),
+        |mut a, b| {
+            if a.is_zero() {
+                return b;
+            }
+            if b.is_zero() {
+                return a;
+            }
+            *Arc::get_mut(&mut a).unwrap() += &*b;
+            a
+        },
+    );
     end_timer!(step);
 
     let step = start_timer!(|| "pcs open");
